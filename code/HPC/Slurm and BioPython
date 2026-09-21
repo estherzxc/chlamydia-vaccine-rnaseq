@@ -1,1 +1,276 @@
+1. FASTQC Reports:
+module load fastqc
+mkdir -p /work/users/x/c/xczhou/Chlamydia_FASTQC
+cd /proj/rosenthal_lab/HTSF/251203_UNC51-VH00562_532_AAF22KWHV
+fastqc A1_RNA_16hrs_AACAGGTT-ATACCAAG_S1_L001_R1_001.fastq.gz -o /work/users/x/c/xczhou/Chlamydia_FASTQC
+application/gzip
 
+#Run multiple FASTQC Together
+#Slurm job header; Nano creates a new blank file with that name
+cd /work/users/x/c/xczhou
+mkdir -p slurm_scripts
+nano slurm_scripts/fastqc_job.sh
+
+#!/bin/bash
+#SBATCH --job-name=fastqc
+#SBATCH --partition=general
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=20
+#SBATCH --mem=20G
+#SBATCH --time=04:00:00
+#SBATCH --output=fastqc.out
+#SBATCH --error=fastqc.err
+#SBATCH --mail-type=end
+#SBATCH --mail-user=xczhou@unc.edu
+
+module load fastqc
+
+cd /proj/rosenthal_lab/HTSF/251203_UNC51-VH00562_532_AAF22KWHV
+mkdir -p /work/users/x/c/xczhou/Chlamydia_FASTQC
+
+fastqc *.fastq.gz -t 20 -o /work/users/x/c/xczhou/Chlamydia_FASTQC
+
+# Move files into subfolders
+cd /work/users/x/c/xczhou/Chlamydia_FASTQC
+mkdir -p html_reports zip_reports
+mv *_fastqc.html html_reports/
+mv *_fastqc.zip zip_reports/
+
+#Check if the output matches
+cd /proj/rosenthal_lab/HTSF/251203_UNC51-VH00562_532_AAF22KWHV
+ls *.fastq.gz | wc -l
+cd $HOME/Chlamydia_FASTQC
+ls *_fastqc.zip | wc -l
+
+
+
+2. Separate R1 and R2
+
+3. extract UMIs
+cd /work/users/x/c/xczhou/slurm_scripts
+nano umi_extract.sh
+
+#!/bin/bash
+#SBATCH --job-name=UMI_Extract
+#SBATCH --partition=general
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=50g
+#SBATCH --time=08:00:00
+#SBATCH --output=UMI_Extract.out
+#SBATCH --error=UMI_Extract.err
+#SBATCH --mail-type=end
+#SBATCH --mail-user=xczhou@unc.edu
+
+module load seqkit
+
+# Define input and output directories
+input_folder="/proj/rosenthal_lab/HTSF/251203_UNC51-VH00562_532_AAF22KWHV"
+output_folder="/work/users/x/c/xczhou/Chlamydia/R1_UMIs"
+
+# Create output directory if it doesn't exist
+mkdir -p "$output_folder"
+
+# Iterate over R1 files
+for file in "$input_folder"/*_R1_001.fastq.gz
+do
+    base_name=$(basename "$file" _R1_001.fastq.gz)
+    output_file="$output_folder/${base_name}_UMI.fastq.gz"
+
+    seqkit subseq -r 1:12 "$file" | gzip > "$output_file"
+
+    echo "Processed $file and saved to $output_file"
+done
+
+sbatch umi_extract.sh
+
+
+4. Add Barcodes
+#Slurm add_barcode.py
+nano add_barcode.py
+
+import gzip
+import os
+import time
+from Bio import SeqIO
+from itertools import islice
+
+# Define the folder containing the input FASTQ.gz files
+input_folder = "/work/users/c/o/cookesf/Chlamydia_Data/08-22-24_Chlamydia_Mouse_Samples/R1_UMIs/"
+# Define the folder where the modified FASTQ.gz files will be saved
+output_folder = "/work/users/c/o/cookesf/Chlamydia_Data/08-22-24_Chlamydia_Mouse_Samples/R1_Modified"
+# Define the path to the file containing the filenames and strings of bases
+config_file = "/work/users/c/o/cookesf/Chlamydia_Data/Python_Files/Sample_Prefix_File.txt"
+
+# Number of FASTQ records to process at a time (125 records = 500 lines)
+records_per_chunk = 1250000
+
+# Ensure the output folder exists
+os.makedirs(output_folder, exist_ok=True)
+
+# Read the configuration file to get the filenames and strings of bases
+with open(config_file, "r") as config:
+    config_data = dict(line.strip().split(',') for line in config)
+
+# Iterate over each file in the specified folder
+for filename in os.listdir(input_folder):
+    if filename.endswith(".fastq.gz"):
+        # Construct the full path to the input FASTQ file
+        input_fastq = os.path.join(input_folder, filename)
+ 
+        # Check if the filename is in the config data
+        if filename in config_data:
+            string_to_add = config_data[filename]
+ 
+            # Define the output file name with the output folder
+            output_fastq = os.path.join(output_folder, filename.replace(".fastq.gz", "_modified.fastq.gz"))
+
+            # Start time measurement
+            start_time = time.time()
+
+            # Open the input and output FASTQ.gz files using gzip
+            with gzip.open(input_fastq, "rt") as infile, gzip.open(output_fastq, "wt") as outfile:
+                # Create an iterator to parse the FASTQ records in chunks
+                records_iterator = SeqIO.parse(infile, "fastq")
+ 
+                while True:
+                    # Fetch the next chunk of records
+                    chunk = list(islice(records_iterator, records_per_chunk))
+ 
+                    # Break the loop if no more records are left to process
+                    if not chunk:
+                        break
+ 
+                    # Modify each record in the chunk
+                    for record in chunk:
+                        # Clear per-letter annotations
+                        record.letter_annotations.clear()
+                        # Prepend the string to the sequence
+                        record.seq = string_to_add + record.seq
+                        # Replace the quality scores with 'K' for the length of the modified sequence
+                        record.letter_annotations["phred_quality"] = [ord('K') - 33] * len(record.seq)
+
+                    # Write the modified chunk to the output file
+                    SeqIO.write(chunk, outfile, "fastq")
+
+            # End time measurement and calculate the duration
+            end_time = time.time()
+            duration = end_time - start_time
+ 
+            # Print a report for the processed file
+            print(f"Finished processing {filename}")
+            print(f"Time taken: {duration:.2f} seconds")
+
+
+#Load Anaconda
+module load anaconda
+#Create a Python environment
+# 1) Make sure 'conda activate' works in this shell
+source $(conda info --base)/etc/profile.d/conda.sh
+
+# 2) Create the environment (one-time)
+conda create -n umi_env python=3.10 biopython -y
+
+# 3) Activate it (every time you want to run the script)
+conda activate umi_env
+
+# 4) Test Biopython
+python -c "from Bio import SeqIO; print('Biopython works')"
+python add_barcode.py
+
+
+5. Combine all the R1 Fastqs together and the R2 Fastqs together
+#!/bin/bash
+#SBATCH --job-name=Combine_R1
+#SBATCH --output=Combine_R1.out
+#SBATCH --error=Combine_R1.err
+#SBATCH -p general
+#SBATCH -N 1
+#SBATCH -n 5
+#SBATCH --mem 120g
+#SBATCH -t 00-24:00:00
+#SBATCH --mail-type=end
+#SBATCH --mail-user=xczhouf@ad.unc.edu
+
+cd /work/users/x/c/xczhou/Chlamydia/R1_Modified
+
+# Output file
+output_file="Combine_R1.fastq.gz"
+
+# Create or clear the output file
+> "$output\_file"
+
+# Loop through all .fastq.gz files
+for file in *.fastq.gz; do
+    # Decompress each input file and append to the gzipped output
+    zcat "$file" >> Combine_R1.fastq
+done
+
+# Compress the combined file
+gzip -c Combine_R1.fastq > "$output_file"
+
+# Remove the uncompressed temporary file
+rm Combine_R1.fastq
+
+Step 5: Run Cellranger Count
+rename ChlamydiaMouse_S1_L001_R2_001.fastq.gz
+
+#!/bin/bash
+#SBATCH --job-name=cellranger_job
+#SBATCH --output=cellranger_job.out
+#SBATCH --error=cellranger_job.err
+#SBATCH -p general
+#SBATCH -N 1
+#SBATCH -n 16
+#SBATCH --mem=120g
+#SBATCH -t 24:00:00
+#SBATCH --mail-type=end
+#SBATCH --mail-user=xczhou@ad.unc.edu
+
+cd /work/users/x/c/xczhou/Chlamydia/10x_Files
+
+module load cellranger
+
+cellranger count \
+  --disable-ui \
+  --id Chlamydia_CellRanger \
+  --create-bam false \
+  --transcriptome /work/users/x/c/xczhou/Chlamydia/10x_Files/Mouse_Chlamydia_Ref_Genome \
+  --fastqs /work/users/x/c/xczhou/Chlamydia/10x_Files \
+  --sample ChlamydiaMouse \
+  --expect-cells 10000 \
+  --chemistry SC3Pv2
+  --localcores 16 \
+  --localmem 120
+
+
+CellRanger single sample
+#!/bin/bash
+#SBATCH --job-name=cellranger_job
+#SBATCH --output=cellranger_job.out
+#SBATCH --error=cellranger_job.err
+#SBATCH -p general 
+#SBATCH -N 1
+#SBATCH -n 16
+#SBATCH --mem=120g
+#SBATCH -t 24:00:00
+#SBATCH --mail-type=end
+#SBATCH --mail-user=xczhou@ad.unc.edu
+
+cd /work/users/x/c/xczhou/Chlamydia/10x_Files
+
+module load cellranger
+
+cellranger count \
+  --disable-ui \
+  --id Chlamydia_CellRanger \
+  --create-bam false \
+  --transcriptome /work/users/x/c/xczhou/Chlamydia/10x_Files/Mouse_Chlamydia_Ref_Genome \
+  --fastqs /work/users/x/c/xczhou/Chlamydia/10x_Files \
+  --sample ChlamydiaMouse \
+  --expect-cells 10000 \
+  --chemistry SC3Pv2 \
+  --localcores 16 \
+  --localmem 120
