@@ -1,0 +1,1155 @@
+---
+title: "DE Analysis Time Interaction"
+author: "Esther Zhou"
+date: "2026-05-01"
+output: html_document
+---
+
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(broom)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(matrixStats)
+library(knitr)
+library(Seurat)
+library(corrplot)
+library(sparseMatrixStats)
+library(SummarizedExperiment)
+library(pheatmap)
+library(corrplot)
+library(ggrepel)
+library(DESeq2)
+library(EnhancedVolcano)
+library(tibble)
+library(patchwork)
+
+table_dir <- "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/Tables"
+
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+
+#Load the datasets
+```{r message=FALSE, warning=FALSE}
+dds_mouse <- readRDS("/work/users/x/c/xczhou/Chlamydia/processed/dds_mouse.rds")
+
+#Excluding M52_D4
+dds_mouse_filtered <- dds_mouse[, !(colnames(dds_mouse) %in% c("M52_D4"))]
+
+# Set reference levels
+dds_mouse_filtered$group <- factor(dds_mouse_filtered$group,
+                                   levels = c("Naive", "Vaccinated"))
+
+dds_mouse_filtered$day <- factor(dds_mouse_filtered$day,
+                                 levels = c("-2", "4", "6", "11"))
+
+```
+
+#Volcano plot
+```{r}
+plot_DE_adj <- function(All.DE, name){
+  
+ All.DE <- All.DE %>%
+    filter(!is.na(padj), padj < 0.05) %>%
+    mutate(
+      keys = case_when(
+        log2FoldChange < -1 ~ "purple",
+        log2FoldChange > 1  ~ "orange",
+        TRUE ~ "black"))
+ 
+  # Adaptive labeling for large gene sets
+  if (nrow(All.DE) <= 12) {
+    # Few genes - label all
+    label_genes <- All.DE$gene
+    max_overlaps <- Inf
+  } else if (nrow(All.DE) <= 100) {
+    # Medium - label most extreme
+    label_genes <- All.DE %>%
+      filter(abs(log2FoldChange) > 2 | padj < 0.01) %>%
+      pull(gene)
+    max_overlaps <- 20}
+  
+  keyvals <- All.DE$keys
+  names(keyvals)[keyvals == "orange"] <- "Positive interaction"
+  names(keyvals)[keyvals == "purple"] <- "Negative interaction"
+  names(keyvals)[keyvals == "black"]  <- "Significant"
+  
+  All.DE$log10_padj <- -log10(All.DE$padj)
+  
+  # Then, get the max value and add 0.5
+  max_y <- max(-log10(All.DE$padj), na.rm = TRUE) + 0.3
+  
+  DEplot <- EnhancedVolcano(All.DE,
+                            lab = All.DE$gene,
+                            selectLab = label_genes,
+                            x = 'log2FoldChange',
+                            y = 'padj',
+                            pCutoff = 0.05,
+                            FCcutoff = 1,
+                            colCustom = keyvals,
+                            title = name, 
+                            drawConnectors = TRUE, 
+                            widthConnectors = 0.5,
+                            max.overlaps = 20,
+                            subtitle = "",
+                            colAlpha = 0.7) +
+    labs(x = expression(log[2]~"fold change"),
+         y = expression(-log[10]~"(adj p)")) +
+    theme(legend.position = "none",
+          plot.title = element_text(
+            hjust = 0.5, 
+            size = 16,
+            face = "bold", 
+            margin = margin(b = -10)
+          ))+
+    scale_y_continuous(limits = c(1, max_y))
+  
+  ggsave(paste0("/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/",name,"_DE_interaction.png"), plot = DEplot, dpi = 300, width = 5.3, height = 5)
+  
+  return(DEplot)
+}
+```
+
+#Line plot individual
+```{r}
+plot_interaction_line <- function(dds, gene, name = NULL, day_levels = NULL,
+                                  outdir = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/") {
+
+  if (is.null(name)) {
+    name <- paste0(gene, "_interaction_line")
+  }
+  
+  plot_data <- plotCounts(
+    dds,
+    gene = gene,
+    intgroup = c("group", "day"),
+    normalized = TRUE,
+    returnData = TRUE
+  )
+    # Guard against zeros on log scale
+  plot_data$count <- plot_data$count + 1
+  
+  p <- ggplot(plot_data, aes(x = day, y = count, color = group, group = group)) +
+    geom_point(size = 3, alpha = 0.8,
+               position = position_jitter(width = 0.08, height = 0)) +
+    stat_summary(fun = median, geom = "line", linewidth = 1) +
+    stat_summary(fun = median, geom = "point", size = 4) +
+    scale_color_manual(
+      values = c(
+        "Naive" = "purple",
+        "Vaccinated" = "orange"
+      )
+    ) +
+    scale_y_log10() +
+    theme_bw() +
+    labs(
+      title = paste("Interaction pattern:", gene),
+      x = "Day",
+      y = "Normalized count + 1 (log scale)"
+    )
+  
+  ggsave(
+    paste0(outdir, name, ".png"),
+    plot = p,
+    dpi = 300,
+    width = 5.3,
+    height = 4.5
+  )
+  
+  return(p)
+}
+```
+
+#Line plot pdf
+```{r}
+plot_interaction_pdf <- function(dds, gene_list, pdf_name, 
+                                  ncol = 4, nrow = 6,
+                                  day_levels = NULL,
+                                  outdir = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/") {
+  
+  # Build all plots
+  plots <- lapply(gene_list, function(gene) {
+    
+    plot_data <- plotCounts(
+      dds,
+      gene = gene,
+      intgroup = c("group", "day"),
+      normalized = TRUE,
+      returnData = TRUE
+    )
+    
+    plot_data$count <- plot_data$count + 1
+    
+    if (!is.null(day_levels)) {
+      plot_data$day <- factor(plot_data$day, levels = day_levels)
+    }
+    
+    ggplot(plot_data, aes(x = day, y = count, color = group, group = group)) +
+      geom_point(size = 2, alpha = 0.8,
+                 position = position_jitter(width = 0.08, height = 0)) +
+      stat_summary(fun = median, geom = "line", linewidth = 0.8) +
+      stat_summary(fun = median, geom = "point", size = 3) +
+      scale_color_manual(values = c("Naive" = "purple", "Vaccinated" = "orange")) +
+      scale_y_log10() +
+      theme_bw(base_size = 9) +
+      labs(title = gene, x = "Day", y = "Count + 1 (log)") +
+      theme(legend.position = "bottom",
+            legend.text = element_text(size = 7),
+            legend.title = element_blank(),
+            plot.title = element_text(face = "bold", size = 9))
+  })
+  
+  # Calculate number of pages needed
+  plots_per_page <- ncol * nrow
+  n_pages <- ceiling(length(plots) / plots_per_page)
+  
+  pdf(paste0(outdir, pdf_name, ".pdf"), width = 4 * ncol, height = 3.5 * nrow)
+  
+  for (i in seq_len(n_pages)) {
+    start <- (i - 1) * plots_per_page + 1
+    end   <- min(i * plots_per_page, length(plots))
+    page_plots <- plots[start:end]
+    
+    # Fill remaining slots on last page with blank plots
+    if (length(page_plots) < plots_per_page) {
+      blanks <- plots_per_page - length(page_plots)
+      page_plots <- c(page_plots, replicate(blanks, ggplot() + theme_void(), simplify = FALSE))
+    }
+    
+    print(wrap_plots(page_plots, ncol = ncol, nrow = nrow))
+  }
+  
+  dev.off()
+  message("Saved: ", outdir, pdf_name, ".pdf")
+}
+```
+
+
+# Model 1: group-by-time interaction model
+
+#Baseline and day 4 DESeq
+```{r message=FALSE, warning=FALSE}
+#filter dataset
+dds_d4 <- dds_mouse_filtered[, dds_mouse_filtered$day %in% c("-2", "4")]
+
+# Drop unused day levels
+dds_d4$day <- droplevels(dds_d4$day)
+dds_d4$group <- droplevels(dds_d4$group)
+
+# Fit interaction model with LRT vs reduced model
+#does adding the interaction term significantly improve the model fit?
+design(dds_d4) <- ~ group + day + group:day
+dds_d4 <- dds_d4[rowSums(counts(dds_d4)) >= 10, ]
+dds_int_d4 <- DESeq(dds_d4, test = "LRT", reduced = ~ group + day)
+
+
+resultsNames(dds_int_d4)
+
+# Extract results (use 0.05 as the FDR threshold)
+res_int_d4 <- results(dds_int_d4, alpha = 0.05)
+
+res_int_d4_df <- as.data.frame(res_int_d4) %>%
+  rownames_to_column("gene")
+
+```
+
+#Baseline and day 4 significant interaction genes Plots
+```{r}
+# filter by padj < 0.05
+sig_int_d4 <- res_int_d4_df[
+  !is.na(res_int_d4_df$padj) &
+    res_int_d4_df$padj < 0.05,]
+
+# sort by adjusted p-value
+sig_int_d4 <- sig_int_d4[order(sig_int_d4$log2FoldChange), ]
+
+# export selected columns
+sig_int_d4_export <- sig_int_d4[, c("gene", "log2FoldChange", "padj")]
+rownames(sig_int_d4_export) <- NULL
+
+write.csv(
+  sig_int_d4_export,
+  file = file.path(table_dir, "Day4_interaction_significant_genes.csv"),
+  row.names = FALSE
+)
+
+#volcano plot
+plot_DE_adj(
+  All.DE = res_int_d4_df,
+  name = "Day4_interaction"
+)
+
+for (g in sig_int_d4$gene) {
+  print(plot_interaction_line(
+    dds = dds_int_d4,
+    gene = g,
+    day_levels = c("-2", "4"),
+    name = paste0("Day4_", g, "_interaction_line")
+  ))
+}
+
+plot_interaction_pdf(
+  dds = dds_int_d4,
+  gene_list = sig_int_d4$gene,
+  pdf_name = "Day4_interaction_lines",
+  ncol = 4, nrow = 6,
+  day_levels = c("-2", "4")
+)
+###############Not Using#############################
+#MA Plot
+plotMA(res_int_d4, ylim = c(-5, 5),
+       main = "Day 4 interaction: Vaccinated vs Naive change from baseline")
+
+#heatmap
+ord <- order(dds_int_d4$group, dds_int_d4$day)
+dds_int_d4_ord <- dds_int_d4[, ord]
+
+plot_interaction_heatmap(
+  dds = dds_int_d4_ord,
+  gene_list = sig_int_d4,
+  name = "Day4_interaction_heatmap_ordered",
+  top_n = 30,
+  intgroup = c("group", "day"),
+  transform_method = "rlog",
+  cluster_cols = FALSE
+)
+```
+
+#Day 6
+```{r message=FALSE, warning=FALSE}
+#filter dataset
+dds_d6 <- dds_mouse_filtered[, dds_mouse_filtered$day %in% c("-2", "6")]
+
+# Drop unused day levels
+dds_d6$day <- droplevels(dds_d6$day)
+dds_d6$group <- droplevels(dds_d6$group)
+
+# Check levels immediately after dropping
+levels(dds_d6$day)
+levels(dds_d6$group) 
+
+# Fit interaction model with LRT vs reduced model
+design(dds_d6) <- ~ group + day + group:day
+dds_d6 <- dds_d6[rowSums(counts(dds_d6)) >= 10, ]
+dds_int_d6 <- DESeq(dds_d6, test = "LRT", reduced = ~ group + day)
+
+resultsNames(dds_int_d6)
+
+#Extract the interaction results
+res_int_d6 <- results(dds_int_d6, alpha = 0.05)
+
+res_int_d6_df <- as.data.frame(res_int_d6) %>%
+  rownames_to_column("gene")
+
+```
+
+#Baseline and day 6 significant interaction genes Plots
+```{r}
+# filter by padj < 0.05
+sig_int_d6 <- res_int_d6_df[
+  !is.na(res_int_d6_df$padj) &
+    res_int_d6_df$padj < 0.05,]
+
+#sorts the significant interaction gene table by adjusted p-value
+sig_int_d6 <- sig_int_d6[order(sig_int_d6$log2FoldChange), ]
+
+sig_int_d6_export <- sig_int_d6[, c("gene", "log2FoldChange", "padj")]
+rownames(sig_int_d6_export) <- NULL
+
+write.csv(
+  sig_int_d6_export,
+  file = file.path(table_dir, "Day6_interaction_significant_genes.csv"),
+  row.names = FALSE
+)
+
+
+#volcano plot
+plot_DE_adj(
+  All.DE = res_int_d6_df,
+  name = "Day6_interaction"
+)
+
+#line plots
+for (g in sig_int_d6$gene) {
+  print(plot_interaction_line(
+    dds = dds_int_d6,
+    gene = g,
+    day_levels = c("-2", "6"),
+    name = paste0("Day6_", g, "_interaction_line")
+  ))
+}
+
+
+plot_interaction_pdf(
+  dds = dds_int_d6,
+  gene_list = sig_int_d6$gene,
+  pdf_name = "Day6_interaction_lines",
+  ncol = 4, nrow = 6,
+  day_levels = c("-2", "6")
+)
+
+```
+
+#Day 11
+```{r}
+#filter dataset
+dds_d11 <- dds_mouse_filtered[, dds_mouse_filtered$day %in% c("-2", "11")]
+
+# Drop unused day levels
+dds_d11$day <- droplevels(dds_d11$day)
+dds_d11$group <- droplevels(dds_d11$group)
+
+# Check levels immediately after dropping
+levels(dds_d11$day)
+levels(dds_d11$group) 
+
+#fit the interaction model
+# Fit interaction model with LRT vs reduced model
+design(dds_d11) <- ~ group + day + group:day
+dds_d11 <- dds_d11[rowSums(counts(dds_d11)) >= 10, ]
+dds_int_d11 <- DESeq(dds_d11, test = "LRT", reduced = ~ group + day)
+resultsNames(dds_int_d11)
+
+# Extract LRT interaction results
+res_int_d11 <- results(dds_int_d11, alpha = 0.05)
+res_int_d11_df <- as.data.frame(res_int_d11) %>%
+  rownames_to_column("gene")
+```
+
+#Baseline and day 11 significant interaction genes Plots
+```{r}
+# filter by padj < 0.05
+sig_int_d11 <- res_int_d11_df[
+  !is.na(res_int_d11_df$padj) &
+    res_int_d11_df$padj < 0.05 ,]
+
+# sort significant interaction gene table by log2FC
+sig_int_d11 <- sig_int_d11[order(sig_int_d11$log2FoldChange), ]
+
+sig_int_d11_export <- sig_int_d11[, c("gene", "log2FoldChange", "padj")]
+rownames(sig_int_d11_export) <- NULL
+
+write.csv(
+  sig_int_d11_export,
+  file = file.path(table_dir, "Day11_interaction_significant_genes.csv"),
+  row.names = FALSE
+)
+
+
+#volcano plot
+plot_DE_adj(
+  All.DE = res_int_d11_df,
+  name = "Day11_interaction"
+)
+
+#line plots
+for (g in sig_int_d11$gene) {
+  print(plot_interaction_line(
+    dds = dds_int_d11,
+    gene = g,
+    day_levels = c("-2", "11"),
+    name = paste0("Day11_", g, "_interaction_line")
+  ))
+}
+
+
+plot_interaction_pdf(
+  dds = dds_int_d11,
+  gene_list = sig_int_d11$gene,
+  pdf_name = "Day11_interaction_lines",
+  ncol = 4, nrow = 6,
+  day_levels = c("-2", "11")
+)
+
+```
+
+
+#Check for overlap
+```{r}
+genes_d4  <- sig_int_d4$gene
+genes_d6  <- sig_int_d6$gene
+genes_d11 <- sig_int_d11$gene
+
+overlap_summary <- data.frame(
+  comparison = c("Day4 & Day6", "Day4 & Day11", "Day6 & Day11", "All three days"),
+  n_overlap = c(
+    length(intersect(genes_d4, genes_d6)),
+    length(intersect(genes_d4, genes_d11)),
+    length(intersect(genes_d6, genes_d11)),
+    length(Reduce(intersect, list(genes_d4, genes_d6, genes_d11)))
+  ),
+  genes = c(
+    paste(intersect(genes_d4, genes_d6), collapse = ", "),
+    paste(intersect(genes_d4, genes_d11), collapse = ", "),
+    paste(intersect(genes_d6, genes_d11), collapse = ", "),
+    paste(Reduce(intersect, list(genes_d4, genes_d6, genes_d11)), collapse = ", ")
+  )
+)
+
+overlap_summary
+```
+
+
+#Heat map of the significant genes
+```{r}
+library(DESeq2)
+library(pheatmap)
+
+# 1. Union of significant interaction genes
+# unique() ensures Clic6 (present in both D6 and D11) is not duplicated → 38 genes total
+interaction_genes <- unique(c(
+  sig_int_d4$gene,
+  sig_int_d6$gene,
+  sig_int_d11$gene
+))
+
+# 2. Transform counts
+# rlog() stabilizes variance across genes (better than raw counts for visualization)
+# blind = FALSE means it uses the experimental design to inform the transformation
+rld <- rlog(dds_mouse_filtered, blind = FALSE)
+mat <- assay(rld) # extract the transformed count matrix (genes x samples)
+
+# 3. Keep matched genes only
+matched_genes <- interaction_genes[interaction_genes %in% rownames(mat)]
+
+# subset to 38 genes x all samples
+mat_int <- mat[matched_genes, , drop = FALSE]
+
+# 4. Build annotation directly from mat_int columns
+# pulling "group" (Naive/Vaccinated) and "day" (-2/4/6/11) for each sample
+anno_col <- as.data.frame(colData(dds_mouse_filtered)[, c("group", "day")])
+anno_col <- anno_col[colnames(mat_int), , drop = FALSE]   # ensure same sample order as matrix
+
+# 5. Set factor levels so days are always ordered -2 → 4 → 6 → 11 (not alphabetically)
+day_levels <- c("-2", "4", "6", "11")
+anno_col$day <- factor(
+  as.character(anno_col$day),
+  levels = day_levels
+)
+
+anno_col$group <- factor(as.character(anno_col$group))  # Naive / Vaccinated
+
+# 6. Build column order manually, day by day
+# We need this because cluster_cols = FALSE, so pheatmap will use exactly the column order we give it — we want: Day-2 | Day4 | Day6 | Day11
+# within each day: Naive first, then Vaccinated
+
+#Create empty containers
+mat_blocks <- list()
+anno_blocks <- list()
+i <- 1
+
+#Loop through days in the chosen order
+for (d in day_levels) {
+  
+  # Find all samples belonging to this day
+  samples_d <- rownames(anno_col)[!is.na(anno_col$day) & anno_col$day == d]
+  samples_d <- samples_d[samples_d %in% colnames(mat_int)]
+  
+  cat("Day:", d, " | Number of samples:", length(samples_d), "\n")
+  
+  # Skip the day if there are no samples
+  if (length(samples_d) == 0) next
+
+# Pull out the expression matrix for this day only
+  mat_d <- mat_int[, samples_d, drop = FALSE]
+
+  #Cluster samples within this day
+  if (length(samples_d) > 1) {
+    #only for clustering columns within each day (temporary)
+    mat_d_scaled <- t(scale(t(mat_d)))
+    mat_d_scaled[is.na(mat_d_scaled)] <- 0
+  
+  hc_d <- hclust(dist(t(mat_d_scaled)))
+  samples_d <- samples_d[hc_d$order]
+}
+  
+  # Store the ordered submatrix and annotation for this day
+  mat_blocks[[i]] <- mat_int[, samples_d, drop = FALSE]
+  anno_blocks[[i]] <- anno_col[samples_d, , drop = FALSE]
+  
+  i <- i + 1
+}
+
+# 7. Combine all day blocks side by side into the final ordered matrix
+mat_ordered <- do.call(cbind, mat_blocks)
+anno_ordered <- do.call(rbind, anno_blocks)
+
+# 8. Safety check: column names of matrix must exactly match row names of annotation
+stopifnot(all(colnames(mat_ordered) == rownames(anno_ordered)))
+
+# 9. Calculate where to draw vertical gap lines between day blocks
+# cumsum gives the column index at the END of each day block
+# we drop the last value because we don't need a gap after the final block
+block_sizes <- sapply(mat_blocks, ncol)
+gaps_col <- cumsum(block_sizes)
+gaps_col <- gaps_col[-length(gaps_col)]
+
+# 10. Define annotation bar colors
+annotation_colors <- list(
+  group = c(
+    Naive = "purple",
+    Vaccinated = "orange"
+  ),
+  day = c(
+    "-2" = "#CCCCCC",
+    "4"  = "#2171b5",
+    "6"  = "#6baed6",
+    "11" = "#9ecae1"
+  )
+)
+
+# 11. Draw the heatmap
+# scale = "row"      → z-score each gene across all samples (so color = relative expression)
+# cluster_rows = TRUE → genes with similar patterns across samples group together
+# cluster_cols = FALSE→ columns stay in the exact order we built above (Day x Group)
+# gaps_col           → draws vertical lines between day blocks
+
+#Cap row-scaled heatmap color
+my_breaks <- seq(-3, 3, length.out = 101)
+
+
+pheatmap(
+  mat_ordered,
+  scale = "row",
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  annotation_col = anno_ordered,
+  annotation_colors = annotation_colors,
+  gaps_col = gaps_col,
+  show_colnames = FALSE,
+  fontsize_row = 11,
+  main = "Significant Group-by-Time Interaction Genes",
+  breaks = my_breaks
+)
+```
+
+
+#Trajectory plots
+
+```{r}
+plot_trajectory_pdf <- function(dds, gene_list, title, pdf_name,
+                                 ncol = 4, nrow = 6,
+                                 day_levels = c("-2", "4", "6", "11"),
+                                 outdir = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/") {
+  
+  # Build one plot per gene
+  plots <- lapply(gene_list, function(g) {
+    
+    plot_data <- plotCounts(
+      dds,
+      gene = g,
+      intgroup = c("group", "day"),
+      normalized = TRUE,
+      returnData = TRUE
+    ) %>%
+      mutate(count = count + 1)
+    
+    plot_data$day <- factor(plot_data$day, levels = day_levels)
+    
+    ggplot(plot_data, aes(x = day, y = count, color = group, group = group)) +
+      geom_point(size = 2, alpha = 0.6,
+                 position = position_jitter(width = 0.08, height = 0)) +
+      stat_summary(fun = median, geom = "line", linewidth = 0.9) +
+      stat_summary(fun = median, geom = "point", size = 3) +
+      scale_color_manual(values = c("Naive" = "purple", "Vaccinated" = "orange")) +
+      scale_y_log10() +
+      theme_bw(base_size = 9) +
+      labs(title = g, x = "Day", y = "Count + 1 (log)") +
+      theme(legend.position = "bottom",
+            legend.title = element_blank(),
+            plot.title = element_text(face = "bold", size = 9))
+  })
+  
+  # Paginate
+  plots_per_page <- ncol * nrow
+  n_pages <- ceiling(length(plots) / plots_per_page)
+  
+  pdf(paste0(outdir, pdf_name, ".pdf"), width = 4 * ncol, height = 3.5 * nrow)
+  
+  for (i in seq_len(n_pages)) {
+    start <- (i - 1) * plots_per_page + 1
+    end   <- min(i * plots_per_page, length(plots))
+    page_plots <- plots[start:end]
+    
+    # Fill blank slots on last page
+    if (length(page_plots) < plots_per_page) {
+      blanks <- plots_per_page - length(page_plots)
+      page_plots <- c(page_plots, replicate(blanks, ggplot() + theme_void(), simplify = FALSE))
+    }
+    
+    print(wrap_plots(page_plots, ncol = ncol, nrow = nrow))
+  }
+  
+  dev.off()
+  message("Saved: ", outdir, pdf_name, ".pdf")
+}
+
+# Day 4 - 3 genes
+plot_trajectory_pdf(
+  dds = dds_mouse_filtered,
+  gene_list = sig_int_d4$gene,
+  pdf_name = "Day4_sig_alldays_trajectory",
+  ncol = 3, nrow = 1
+)
+
+# Day 6 - 24 genes
+plot_trajectory_pdf(
+  dds = dds_mouse_filtered,
+  gene_list = sig_int_d6$gene,
+  pdf_name = "Day6_sig_alldays_trajectory",
+  ncol = 4, nrow = 6
+)
+
+# Day 11 - 12 genes
+plot_trajectory_pdf(
+  dds = dds_mouse_filtered,
+  gene_list = sig_int_d11$gene,
+  pdf_name = "Day11_sig_alldays_trajectory",
+  ncol = 4, nrow = 3
+)
+```
+
+
+#Model 2: Genes that change over time similarly in both groups
+Among the remaining genes, which genes change from −2 to day 4 in a similar/shared way across both groups?
+
+#day 4
+```{r}
+# Remove interaction-significant genes from the object before fitting
+dds_main_d4 <- dds_d4[!(rownames(dds_d4) %in% sig_int_d4$gene), ]
+design(dds_main_d4) <- ~ group + day
+dds_main_d4 <- DESeq(dds_main_d4)
+resultsNames(dds_main_d4)
+
+#extract the day effect
+res_time_d4 <- results(
+  dds_main_d4,
+  name = "day_4_vs_.2",
+  alpha = 0.05
+)
+
+res_time_d4_df <- as.data.frame(res_time_d4) %>%
+  rownames_to_column("gene")
+
+#Volcano plot
+plot_DE(
+  All.DE = res_time_d4_df,
+  name = "Day4_shared_time_effect"
+)
+
+## Export uses stricter filtered table
+shared_sig_d4_export <- res_time_d4_df %>%
+  filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) > 1) %>%
+  arrange(padj) %>%
+  select(gene, log2FoldChange, padj)
+
+write.csv(shared_sig_d4_export,
+          file = file.path(table_dir, "Day4_shared_time_significant_genes.csv"),
+          row.names = FALSE)
+
+#heatmap
+shared_sig_d4 <- res_time_d4_df %>%
+  filter(!is.na(padj), padj < 0.05)
+
+top_shared_up_d4 <- shared_sig_d4 %>%
+  filter(log2FoldChange > 0) %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+top_shared_down_d4 <- shared_sig_d4 %>%
+  filter(log2FoldChange < 0) %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+top_shared_d4 <- bind_rows(top_shared_up_d4, top_shared_down_d4)
+
+
+ord <- order(dds_main_d4$group, dds_main_d4$day)
+dds_main_d4_ord <- dds_main_d4[, ord]
+
+# Heatmap of top shared Day 4 response genes
+plot_interaction_heatmap(
+  dds = dds_main_d4_ord,
+  gene_list = top_shared_d4,
+  name = "Day4_shared_time_top30_heatmap",
+  intgroup = c("group", "day"),
+  transform_method = "rlog",
+  cluster_cols = FALSE
+)
+
+```
+
+
+#day6
+
+```{r}
+dds_main_d6 <- dds_d6[!(rownames(dds_d6) %in% sig_int_d6$gene), ]
+design(dds_main_d6) <- ~ group + day
+dds_main_d6 <- DESeq(dds_main_d6)
+resultsNames(dds_main_d6)
+
+#extract the day effect
+res_time_d6 <- results(
+  dds_main_d6,
+  name = "day_6_vs_.2",
+  alpha = 0.05
+)
+
+res_time_d6_df <- as.data.frame(res_time_d6) %>%
+  rownames_to_column("gene")
+
+#Volcano plot
+plot_DE(
+  All.DE = res_time_d6_df,
+  name = "Day6_shared_time_effect"
+)
+
+## Export uses stricter filtered table
+shared_sig_d6_export <- res_time_d6_df %>%
+  filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) > 1) %>%
+  arrange(padj) %>%
+  select(gene, log2FoldChange, padj)
+
+write.csv(shared_sig_d6_export,
+          file = file.path(table_dir, "Day6_shared_time_significant_genes.csv"),
+          row.names = FALSE)
+
+
+#heatmap
+shared_sig_d6 <- res_time_d6_df %>%
+  filter(!is.na(padj), padj < 0.05)
+
+top_shared_up_d6 <- shared_sig_d6 %>%
+  filter(log2FoldChange > 0) %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+top_shared_down_d6 <- shared_sig_d6 %>%
+  filter(log2FoldChange < 0) %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+top_shared_d6 <- bind_rows(top_shared_up_d6, top_shared_down_d6)
+
+
+ord <- order(dds_main_d6$group, dds_main_d6$day)
+dds_main_d6_ord <- dds_main_d6[, ord]
+
+# Heatmap of top shared Day 6 response genes
+plot_interaction_heatmap(
+  dds = dds_main_d6_ord,
+  gene_list = top_shared_d6,
+  name = "Day6_shared_time_top30_heatmap",
+  intgroup = c("group", "day"),
+  transform_method = "rlog",
+  cluster_cols = FALSE
+)
+
+
+```
+
+
+#day11
+```{r}
+# day11
+dds_main_d11 <- dds_d11[!(rownames(dds_d11) %in% sig_int_d11$gene), ]
+design(dds_main_d11) <- ~ group + day
+dds_main_d11 <- DESeq(dds_main_d11)
+resultsNames(dds_main_d11)
+
+# extract the day effect
+res_time_d11 <- results(
+  dds_main_d11,
+  name = "day_11_vs_.2",
+  alpha = 0.05
+)
+
+res_time_d11_df <- as.data.frame(res_time_d11) %>%
+  rownames_to_column("gene")
+
+
+# Volcano plot
+plot_DE(
+  All.DE = res_time_d11_df,
+  name = "Day11_shared_time_effect"
+)
+
+# Export uses stricter filtered table
+shared_sig_d11_export <- res_time_d11_df %>%
+  filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) > 1) %>%
+  arrange(padj) %>%
+  select(gene, log2FoldChange, padj)
+
+write.csv(shared_sig_d11_export,
+          file = file.path(table_dir, "Day11_shared_time_significant_genes.csv"),
+          row.names = FALSE)
+
+# Heatmap
+shared_sig_d11 <- res_time_d11_df %>%
+  filter(!is.na(padj), padj < 0.05)
+
+top_shared_up_d11 <- shared_sig_d11 %>%
+  filter(log2FoldChange > 0) %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+top_shared_down_d11 <- shared_sig_d11 %>%
+  filter(log2FoldChange < 0) %>%
+  arrange(padj) %>%
+  slice_head(n = 15)
+
+top_shared_d11 <- bind_rows(top_shared_up_d11, top_shared_down_d11)
+
+ord <- order(dds_main_d11$group, dds_main_d11$day)
+dds_main_d11_ord <- dds_main_d11[, ord]
+
+# Heatmap of top shared Day 11 response genes
+plot_interaction_heatmap(
+  dds = dds_main_d11_ord,
+  gene_list = top_shared_d11,
+  name = "Day11_shared_time_top30_heatmap",
+  intgroup = c("group", "day"),
+  transform_method = "rlog",
+  cluster_cols = FALSE
+)
+```
+
+
+
+#Heatmap function
+```{r}
+plot_interaction_heatmap <- function(dds,
+                                     gene_list,
+                                     name,
+                                     intgroup = c("group", "day"),
+                                     transform_method = c("rlog", "vst"),
+                                     top_n = NULL,
+                                     cluster_rows = TRUE,
+                                     cluster_cols = FALSE,
+                                     scale_rows = TRUE,
+                                     outdir = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/") {
+  
+  transform_method <- match.arg(transform_method)
+  
+  # If gene_list is a DE result dataframe, extract genes
+  if (is.data.frame(gene_list)) {
+    if (!"gene" %in% colnames(gene_list)) {
+      stop("If gene_list is a dataframe, it must contain a column named 'gene'.")
+    }
+    
+    if (!is.null(top_n) && "padj" %in% colnames(gene_list)) {
+      gene_list <- gene_list %>%
+        filter(!is.na(padj)) %>%
+        arrange(padj) %>%
+        slice_head(n = top_n) %>%
+        pull(gene)
+    } else {
+      gene_list <- gene_list$gene
+    }
+  }
+  
+  # Keep only genes present in dds
+  gene_list <- intersect(gene_list, rownames(dds))
+  
+  if (length(gene_list) == 0) {
+    stop("No genes in gene_list are found in the DESeqDataSet.")
+  }
+  
+  # Transform counts
+  if (transform_method == "rlog") {
+    trans_obj <- rlog(dds, blind = TRUE)
+  } else {
+    trans_obj <- vst(dds, blind = TRUE)
+  }
+  
+  mat <- assay(trans_obj)[gene_list, , drop = FALSE]
+  
+  # Scale each gene across samples
+  if (scale_rows) {
+    mat <- t(scale(t(mat)))
+  }
+  
+  # Sample annotation
+  ann_col <- as.data.frame(colData(dds)[, intgroup, drop = FALSE])
+  ann_colors <- list(group = c("Naive" = "purple", "Vaccinated" = "orange"))
+  ann_colors <- ann_colors[names(ann_colors) %in% colnames(ann_col)]
+  
+  # Save heatmap
+  pheatmap(
+    mat,
+    annotation_col = ann_col,
+    annotation_colors = ann_colors,
+    cluster_rows = cluster_rows,
+    cluster_cols = cluster_cols,
+    show_rownames = TRUE,
+    show_colnames = FALSE,
+    fontsize_row = 9,
+    main = name,
+    filename = file.path(outdir, paste0(name, "_heatmap.png")),
+    width = 7,
+    height = max(4.5, length(gene_list) * 0.25)
+  )
+}
+```
+
+
+
+#heatmap
+```{r}
+#1. Union all significant genes
+shared_sig_d4_padj <- res_time_d4_df %>%
+  filter(!is.na(padj), padj < 0.05) %>%
+  pull(gene)
+
+shared_sig_d6_padj <- res_time_d6_df %>%
+  filter(!is.na(padj), padj < 0.05) %>%
+  pull(gene)
+
+shared_sig_d11_padj <- res_time_d11_df %>%
+  filter(!is.na(padj), padj < 0.05) %>%
+  pull(gene)
+
+shared_genes_all <- unique(c(
+  shared_sig_d4_padj,
+  shared_sig_d6_padj,
+  shared_sig_d11_padj
+))
+
+length(shared_genes_all)
+
+#Transform and subset to all shared-time genes
+rld <- rlog(dds_mouse_filtered, blind = FALSE)
+mat <- assay(rld)
+
+matched_shared_genes <- shared_genes_all[shared_genes_all %in% rownames(mat)]
+
+mat_int <- mat[matched_shared_genes, , drop = FALSE]
+
+dim(mat_int)
+
+#Use the same within-day sample clustering procedure
+anno_col <- as.data.frame(colData(dds_mouse_filtered)[, c("group", "day")])
+anno_col <- anno_col[colnames(mat_int), , drop = FALSE]
+
+day_levels <- c("-2", "4", "6", "11")
+
+anno_col$day <- factor(as.character(anno_col$day), levels = day_levels)
+anno_col$group <- factor(as.character(anno_col$group))
+
+mat_blocks <- list()
+anno_blocks <- list()
+i <- 1
+
+for (d in day_levels) {
+  
+  samples_d <- rownames(anno_col)[!is.na(anno_col$day) & anno_col$day == d]
+  samples_d <- samples_d[samples_d %in% colnames(mat_int)]
+  
+  cat("Day:", d, " | Number of samples:", length(samples_d), "\n")
+  
+  if (length(samples_d) == 0) next
+  
+  mat_d <- mat_int[, samples_d, drop = FALSE]
+  
+  if (length(samples_d) > 1) {
+    mat_d_scaled <- t(scale(t(mat_d)))
+    mat_d_scaled[is.na(mat_d_scaled)] <- 0
+    
+    hc_d <- hclust(dist(t(mat_d_scaled)))
+    samples_d <- samples_d[hc_d$order]
+  }
+  
+  mat_blocks[[i]] <- mat_int[, samples_d, drop = FALSE]
+  anno_blocks[[i]] <- anno_col[samples_d, , drop = FALSE]
+  
+  i <- i + 1
+}
+
+mat_ordered <- do.call(cbind, mat_blocks)
+anno_ordered <- do.call(rbind, anno_blocks)
+
+stopifnot(all(colnames(mat_ordered) == rownames(anno_ordered)))
+
+block_sizes <- sapply(mat_blocks, ncol)
+gaps_col <- cumsum(block_sizes)
+gaps_col <- gaps_col[-length(gaps_col)]
+
+
+#heatmap, use k-means for clustering? (kmeans_k = 10)
+annotation_colors <- list(
+  group = c(
+    Naive = "purple",
+    Vaccinated = "orange"
+  ),
+  day = c(
+    "-2" = "#CCCCCC",
+    "4"  = "#2171b5",
+    "6"  = "#6baed6",
+    "11" = "#9ecae1"
+  )
+)
+
+my_breaks <- seq(-3, 3, length.out = 101)
+
+ph <- pheatmap(
+  mat_ordered,
+  scale = "row",
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  treeheight_row = 250,   # increase row dendrogram/linkage size
+  treeheight_col = 0,
+  annotation_col = anno_ordered,
+  annotation_colors = annotation_colors,
+  gaps_col = gaps_col,
+  show_colnames = FALSE,
+  show_rownames = TRUE,
+  fontsize_row = 1,
+  breaks = my_breaks,
+  main = "Shared Time-Effect Genes",
+  filename = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/Shared_Time_Effect_Genes_heatmap_large.pdf",
+  width = 14,
+  height = 80
+)
+
+#20 Clusters
+set.seed(123)
+
+ph <- pheatmap(
+  mat_ordered,
+  scale = "row",
+  kmeans_k = 20,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  treeheight_row = 150,   # increase row dendrogram/linkage size
+  treeheight_col = 0,
+  annotation_col = anno_ordered,
+  annotation_colors = annotation_colors,
+  gaps_col = gaps_col,
+  show_colnames = FALSE,
+  show_rownames = FALSE,
+  breaks = my_breaks,
+  main = "Shared Time-Effect Genes",
+  filename = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/Shared_Time_Effect_Genes_heatmap_20.pdf",
+  width = 10,
+  height = 20
+)
+
+gene_clusters <- data.frame(
+  gene = names(ph$kmeans$cluster),
+  cluster = ph$kmeans$cluster
+)
+
+head(gene_clusters)
+table(gene_clusters$cluster)
+write.csv(
+  gene_clusters,
+  file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/Shared_Time_Effect_Genes_kmeans20_clusters.csv",
+  row.names = FALSE
+)
+
+```
+

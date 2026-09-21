@@ -1,0 +1,334 @@
+---
+title: "DE Analysis reduced noise"
+author: "Esther Zhou"
+date: "2026-05-16"
+output: html_document
+---
+
+
+```{r message=FALSE, warning=FALSE}
+library(DESeq2)
+library(dplyr)
+library(tibble)
+library(writexl)
+
+```
+
+```{r message=FALSE, warning=FALSE}
+table_dir <- "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/Tables"
+
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+#Load the datasets
+```{r message=FALSE, warning=FALSE}
+dds_mouse <- readRDS("/work/users/x/c/xczhou/Chlamydia/processed/dds_mouse.rds")
+
+#Excluding M52_D4
+dds_mouse_filtered <- dds_mouse[, !(colnames(dds_mouse) %in% c("M52_D4"))]
+
+# Set reference levels
+dds_mouse_filtered$group <- factor(dds_mouse_filtered$group,
+                                   levels = c("Naive", "Vaccinated"))
+
+dds_mouse_filtered$day <- factor(dds_mouse_filtered$day,
+                                 levels = c("-2", "4", "6", "11"))
+
+```
+
+
+
+#Filter out low expression and low variance
+```{r}
+# Extract raw count matrix
+raw_counts <- counts(dds_mouse_filtered)
+
+# Filter bottom 25% by mean raw expression
+gene_mean <- rowMeans(raw_counts)
+expr_cutoff <- quantile(gene_mean, 0.25)
+keep_expr <- gene_mean > expr_cutoff
+dds_expr_filtered <- dds_mouse_filtered[keep_expr, ]
+
+
+# VST on expression-filtered dds for variance filtering
+dds_expr_filtered <- estimateSizeFactors(dds_expr_filtered)
+vst_mat <- assay(vst(dds_expr_filtered, blind = TRUE))
+
+# Filter bottom 25% by variance on VST matrix
+gene_vars <- apply(vst_mat, 1, var)
+var_cutoff <- quantile(gene_vars, 0.25)
+keep_var <- gene_vars > var_cutoff
+
+
+# Final filtered DESeqDataSet
+dds_final <- dds_expr_filtered[keep_var, ]
+
+
+# Subset by group
+dds_naive <- dds_final[, dds_final$group == "Naive"]
+dds_vacc  <- dds_final[, dds_final$group == "Vaccinated"]
+
+# Drop unused factor levels
+dds_naive$day <- droplevels(dds_naive$day)
+dds_vacc$day  <- droplevels(dds_vacc$day)
+
+# Design is now just day (no group needed since we're within one group)
+design(dds_naive) <- ~ day
+design(dds_vacc)  <- ~ day
+
+# Run DESeq2 separately
+dds_naive <- DESeq(dds_naive)
+dds_vacc  <- DESeq(dds_vacc)
+
+# Check result names
+resultsNames(dds_naive)
+resultsNames(dds_vacc)
+
+# Extract results for each group
+naive_d4  <- results(dds_naive, name = "day_4_vs_.2")
+naive_d6  <- results(dds_naive, name = "day_6_vs_.2")
+naive_d11 <- results(dds_naive, name = "day_11_vs_.2")
+
+vacc_d4   <- results(dds_vacc, name = "day_4_vs_.2")
+vacc_d6   <- results(dds_vacc, name = "day_6_vs_.2")
+vacc_d11  <- results(dds_vacc, name = "day_11_vs_.2")
+
+```
+# Filtering summary
+```{r}
+# Number of genes before filtering
+n_start <- nrow(dds_mouse_filtered)
+
+# Number of genes after expression filtering
+n_after_expr <- nrow(dds_expr_filtered)
+
+# Number of genes after expression + variance filtering
+n_final <- nrow(dds_final)
+
+# Summary table
+filter_summary <- data.frame(
+  Step = c("Before filtering",
+           "After low-expression filter",
+           "After low-variance filter"),
+  Genes_remaining = c(n_start, n_after_expr, n_final),
+  Genes_filtered_out = c(0,
+                         n_start - n_after_expr,
+                         n_after_expr - n_final),
+  Total_filtered_out_from_start = c(0,
+                                    n_start - n_after_expr,
+                                    n_start - n_final)
+)
+
+filter_summary
+```
+
+
+
+```{r}
+# Count significant genes by group and day
+count_sig <- function(res, padj_thresh = 0.05, lfc_thresh = NULL) {
+  keep <- !is.na(res$padj) & res$padj < padj_thresh
+  if (!is.null(lfc_thresh)) keep <- keep & abs(res$log2FoldChange) > lfc_thresh
+  sum(keep)
+}
+
+thresholds <- list(
+  c(padj = 0.05,  lfc = 1),
+  c(padj = 0.01,  lfc = 1),
+  c(padj = 0.01,  lfc = 1.5),
+  c(padj = 0.001, lfc = 1),
+  c(padj = 0.001, lfc = 1.5),
+  c(padj = 0.001, lfc = 2)
+)
+
+results_list <- list(
+  Naive_D4 = naive_d4, Naive_D6 = naive_d6, Naive_D11 = naive_d11,
+  Vacc_D4  = vacc_d4,  Vacc_D6  = vacc_d6,  Vacc_D11  = vacc_d11
+)
+
+summary_df <- do.call(rbind, lapply(names(results_list), function(nm) {
+  res <- results_list[[nm]]
+  counts <- sapply(thresholds, function(t) count_sig(res, padj_thresh = t["padj"], lfc_thresh = t["lfc"]))
+  names(counts) <- c("padj_0.05_lfc1", "padj_0.01_lfc1", "padj_0.01_lfc1.5",
+                     "padj_0.001_lfc1", "padj_0.001_lfc1.5", "padj_0.001_lfc2")
+  c(Comparison = nm, counts)
+}))
+
+print(as.data.frame(summary_df))
+```
+
+
+```{r}
+
+#Histogram of Log2FC
+hist(res_d4$log2FoldChange,
+     breaks = 100,
+     main = "Distribution of log2 Fold Changes: Day 4 vs Day -2",
+     xlab = "log2 Fold Change")
+
+abline(v = c(-1, 1), col = "red", lty = 2, lwd = 2)
+abline(v = c(-log2(3), log2(3)), col = "blue", lty = 2, lwd = 2)
+
+hist(res_d6$log2FoldChange,
+     breaks = 100,
+     main = "Distribution of log2 Fold Changes: Day 6 vs Day -2",
+     xlab = "log2 Fold Change")
+
+hist(res_d11$log2FoldChange,
+     breaks = 100,
+     main = "Distribution of log2 Fold Changes: Day 11 vs Day -2",
+     xlab = "log2 Fold Change")
+
+```
+
+```{r}
+combined_cutoff_summary <- function(res) {
+  data.frame(
+    padj_0.05_lfc1 = sum(!is.na(res$padj) &
+                           res$padj < 0.05 &
+                           abs(res$log2FoldChange) > 1),
+    
+    padj_0.01_lfc1 = sum(!is.na(res$padj) &
+                           res$padj < 0.01 &
+                           abs(res$log2FoldChange) > 1),
+    
+    padj_0.01_lfc1.5 = sum(!is.na(res$padj) &
+                             res$padj < 0.01 &
+                             abs(res$log2FoldChange) > 1.5),
+    
+    padj_0.001_lfc1 = sum(!is.na(res$padj) &
+                            res$padj < 0.001 &
+                            abs(res$log2FoldChange) > 1),
+    
+    padj_0.001_lfc1.5 = sum(!is.na(res$padj) &
+                              res$padj < 0.001 &
+                              abs(res$log2FoldChange) > 1.5),
+
+        # FC > 4 or FC < 0.25    
+    padj_0.001_lfc2 = sum(!is.na(res$padj) &
+                            res$padj < 0.001 &
+                            abs(res$log2FoldChange) > 2)
+  )
+}
+
+combined_summary <- rbind(
+  Day4_vs_DayMinus2 = combined_cutoff_summary(res_d4),
+  Day6_vs_DayMinus2 = combined_cutoff_summary(res_d6),
+  Day11_vs_DayMinus2 = combined_cutoff_summary(res_d11)
+)
+
+combined_summary
+```
+```{r}
+get_up_down_genes <- function(res, padj_cutoff = 0.001, lfc_cutoff = 2) {
+  
+  res_df <- as.data.frame(res) %>%
+    rownames_to_column("gene") %>%
+    filter(!is.na(padj))
+  
+  up_genes <- res_df %>%
+    filter(padj < padj_cutoff,
+           log2FoldChange > lfc_cutoff) %>%
+    arrange(padj)
+  
+  down_genes <- res_df %>%
+    filter(padj < padj_cutoff,
+           log2FoldChange < -lfc_cutoff) %>%
+    arrange(padj)
+  
+  list(
+    up = up_genes,
+    down = down_genes
+  )
+}
+
+naive_d4_genes_lfc2 <- get_up_down_genes(naive_d4, padj_cutoff = 0.001, lfc_cutoff = 2)
+naive_d6_genes_lfc2 <- get_up_down_genes(naive_d6, padj_cutoff = 0.001, lfc_cutoff = 2)
+naive_d11_genes_lfc2 <- get_up_down_genes(naive_d11, padj_cutoff = 0.001, lfc_cutoff = 2)
+
+vacc_d4_genes_lfc2 <- get_up_down_genes(vacc_d4, padj_cutoff = 0.001, lfc_cutoff = 2)
+vacc_d6_genes_lfc2 <- get_up_down_genes(vacc_d6, padj_cutoff = 0.001, lfc_cutoff = 2)
+vacc_d11_genes_lfc2 <- get_up_down_genes(vacc_d11, padj_cutoff = 0.001, lfc_cutoff = 2)
+
+data.frame(
+  comparison = c(
+    "Naive_Day4_vs_DayMinus2",
+    "Naive_Day6_vs_DayMinus2",
+    "Naive_Day11_vs_DayMinus2",
+    "Vacc_Day4_vs_DayMinus2",
+    "Vacc_Day6_vs_DayMinus2",
+    "Vacc_Day11_vs_DayMinus2"
+  ),
+  up = c(
+    nrow(naive_d4_genes_lfc2$up),
+    nrow(naive_d6_genes_lfc2$up),
+    nrow(naive_d11_genes_lfc2$up),
+    nrow(vacc_d4_genes_lfc2$up),
+    nrow(vacc_d6_genes_lfc2$up),
+    nrow(vacc_d11_genes_lfc2$up)
+  ),
+  down = c(
+    nrow(naive_d4_genes_lfc2$down),
+    nrow(naive_d6_genes_lfc2$down),
+    nrow(naive_d11_genes_lfc2$down),
+    nrow(vacc_d4_genes_lfc2$down),
+    nrow(vacc_d6_genes_lfc2$down),
+    nrow(vacc_d11_genes_lfc2$down)
+  )
+)
+
+write_xlsx(
+  list(
+    Naive_Day4_up = naive_d4_genes_lfc2$up,
+    Naive_Day4_down = naive_d4_genes_lfc2$down,
+    Naive_Day6_up = naive_d6_genes_lfc2$up,
+    Naive_Day6_down = naive_d6_genes_lfc2$down,
+    Naive_Day11_up = naive_d11_genes_lfc2$up,
+    Naive_Day11_down = naive_d11_genes_lfc2$down,
+    
+    Vacc_Day4_up = vacc_d4_genes_lfc2$up,
+    Vacc_Day4_down = vacc_d4_genes_lfc2$down,
+    Vacc_Day6_up = vacc_d6_genes_lfc2$up,
+    Vacc_Day6_down = vacc_d6_genes_lfc2$down,
+    Vacc_Day11_up = vacc_d11_genes_lfc2$up,
+    Vacc_Day11_down = vacc_d11_genes_lfc2$down
+  ),
+  path = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/Tables/group_specific_padj0.001_lfc2_up_down_genes.xlsx"
+)
+
+sheet_counts <- data.frame(
+  sheet = c(
+    "Naive_Day4_up",
+    "Naive_Day4_down",
+    "Naive_Day6_up",
+    "Naive_Day6_down",
+    "Naive_Day11_up",
+    "Naive_Day11_down",
+    "Vacc_Day4_up",
+    "Vacc_Day4_down",
+    "Vacc_Day6_up",
+    "Vacc_Day6_down",
+    "Vacc_Day11_up",
+    "Vacc_Day11_down"
+  ),
+  gene_count = c(
+    nrow(naive_d4_genes_lfc2$up),
+    nrow(naive_d4_genes_lfc2$down),
+    nrow(naive_d6_genes_lfc2$up),
+    nrow(naive_d6_genes_lfc2$down),
+    nrow(naive_d11_genes_lfc2$up),
+    nrow(naive_d11_genes_lfc2$down),
+    nrow(vacc_d4_genes_lfc2$up),
+    nrow(vacc_d4_genes_lfc2$down),
+    nrow(vacc_d6_genes_lfc2$up),
+    nrow(vacc_d6_genes_lfc2$down),
+    nrow(vacc_d11_genes_lfc2$up),
+    nrow(vacc_d11_genes_lfc2$down)
+  )
+)
+
+sheet_counts
+
+```
+

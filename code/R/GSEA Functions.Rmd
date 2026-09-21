@@ -1,0 +1,299 @@
+---
+title: "GSEA Function"
+author: "Esther Zhou"
+date: "2026-04-17"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+library(fgsea)
+library(DESeq2)
+library(msigdbr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+```
+
+#Load Dataset and exclude M52_D4
+```{r}
+dds_mouse <- readRDS("/work/users/x/c/xczhou/Chlamydia/processed/dds_mouse.rds")
+sample_info <- readRDS("/work/users/x/c/xczhou/Chlamydia/processed/sample_info.rds")
+dds_mouse_filtered <- dds_mouse[, !(colnames(dds_mouse) %in% c("M52_D4"))]
+
+```
+
+#Run DESeq2 to get a ranking statistics for day 4, 6, and 11
+```{r message=FALSE, warning=FALSE}
+dds4 <- dds_mouse_filtered[, dds_mouse_filtered$day==4]
+
+# Remove genes with all zero counts in Day 4 samples
+dds4 <- dds4[which(rowSums(dds4@assays@data@listData[["counts"]]) != 0),]
+dds4
+
+# Set group reference level
+dds4$group <- factor(dds4$group, levels=c("Naive","Vaccinated"))
+#Model gene expression as a function of group
+design(dds4) <- ~ group
+dds4 <- DESeq(dds4)
+
+
+#Day 6
+dds6 <- dds_mouse_filtered[, dds_mouse_filtered$day==6]
+dds6 <- dds6[which(rowSums(dds6@assays@data@listData[["counts"]]) != 0),]
+dds6$group <- factor(dds6$group, levels=c("Naive","Vaccinated"))
+design(dds6) <- ~ group
+dds6 <- DESeq(dds6)
+
+#Day 11
+dds11 <- dds_mouse_filtered[, dds_mouse_filtered$day==11]
+dds11 <- dds11[which(rowSums(dds11@assays@data@listData[["counts"]]) != 0),]
+dds11$group <- factor(dds11$group, levels=c("Naive","Vaccinated"))
+design(dds11) <- ~ group
+dds11 <- DESeq(dds11)
+
+```
+
+
+#GSEA Function for M7 and M8
+```{r}
+#============================================================
+# Helper function: run full GSEA pipeline for one day
+#============================================================
+run_gsea_day <- function(dds_obj, day_label, pathways_m7, pathways_m8,
+                         msig_m7, msig_m8, output_dir) {
+  
+  # --- 1. Extract ranked stats ---
+  res <- results(dds_obj, contrast = c("group", "Vaccinated", "Naive"))
+  rank <- res$stat
+  names(rank) <- rownames(res)
+  rank <- rank[!is.na(rank)]
+  rank <- sort(rank, decreasing = TRUE)
+  
+  # --- 2. Diagnostics ---
+  cat("\n=== Day", day_label, "===\n")
+  cat("Duplicated gene names:", sum(duplicated(names(rank))), "\n")
+  cat("Non-finite values:", sum(!is.finite(rank)), "\n")
+  cat("Overlap with M7:", sum(names(rank) %in% unique(msig_m7$gene_symbol)), "\n")
+  cat("Overlap with M8:", sum(names(rank) %in% unique(msig_m8$gene_symbol)), "\n")
+  
+  # --- 3. Run fgsea ---
+  fgsea_m7 <- fgsea(pathways = pathways_m7, stats = rank,
+                    minSize = 10, maxSize = 500) %>% arrange(padj)
+  fgsea_m8 <- fgsea(pathways = pathways_m8, stats = rank,
+                    minSize = 10, maxSize = 500) %>% arrange(padj)
+  
+  # --- 4. Summarize significance ---
+  for (tag in c("M7", "M8")) {
+    df <- if (tag == "M7") fgsea_m7 else fgsea_m8
+    n_total <- nrow(df)
+    n_sig   <- sum(df$padj < 0.05, na.rm = TRUE)
+    cat(tag, "Day", day_label, ":",
+        n_sig, "/", n_total, "pathways significant (",
+        round(n_sig / n_total * 100, 1), "% )\n")
+  }
+  
+  # --- 5. Filter significant ---
+  fgsea_m7_sig <- fgsea_m7 %>% dplyr::filter(padj < 0.05)
+  fgsea_m8_sig <- fgsea_m8 %>% dplyr::filter(padj < 0.05)
+  
+  # --- 6. Top 10 up/down ---
+  get_top10 <- function(df, direction) {
+    if (direction == "up") {
+      df %>% dplyr::filter(NES > 0) %>% dplyr::arrange(desc(NES)) %>%
+        dplyr::select(pathway, NES, padj, size, leadingEdge) %>%
+        dplyr::slice_head(n = 10)
+    } else {
+      df %>% dplyr::filter(NES < 0) %>% dplyr::arrange(NES) %>%
+        dplyr::select(pathway, NES, padj, size, leadingEdge) %>%
+        dplyr::slice_head(n = 10)
+    }
+  }
+  
+  top_m7 <- bind_rows(get_top10(fgsea_m7_sig, "up"),
+                      get_top10(fgsea_m7_sig, "down"))
+  top_m8 <- bind_rows(get_top10(fgsea_m8_sig, "up"),
+                      get_top10(fgsea_m8_sig, "down"))
+  
+  # --- 7. Write CSVs ---
+  write.csv(fgsea_m7_sig[, c("pathway","NES","padj","size")],
+            file.path(output_dir, paste0("fgsea_m7_day", day_label, "_sig.csv")),
+            row.names = FALSE)
+  write.csv(fgsea_m8_sig[, c("pathway","NES","padj","size")],
+            file.path(output_dir, paste0("fgsea_m8_day", day_label, "_sig.csv")),
+            row.names = FALSE)
+  write.csv(fgsea_m7[, c("pathway","NES","padj","size")],
+            file.path(output_dir, paste0("fgsea_m7_day", day_label, "_clean.csv")),
+            row.names = FALSE)
+  write.csv(fgsea_m8[, c("pathway","NES","padj","size")],
+            file.path(output_dir, paste0("fgsea_m8_day", day_label, "_clean.csv")),
+            row.names = FALSE)
+  
+  # --- 8. Return results for plotting ---
+  list(
+    fgsea_m7 = fgsea_m7, fgsea_m8 = fgsea_m8,
+    fgsea_m7_sig = fgsea_m7_sig, fgsea_m8_sig = fgsea_m8_sig,
+    top_m7 = top_m7, top_m8 = top_m8,
+    rank = rank
+  )
+}
+
+
+#============================================================
+# Helper function: generate bar + dot plots for one day
+#============================================================
+plot_gsea_day <- function(results, day_label) {
+  
+  make_plot_df <- function(top_df) {
+    top_df %>%
+      mutate(direction = ifelse(NES > 0, "Positive", "Negative"),
+             pathway = reorder(pathway, NES))
+  }
+  
+  plot_m7 <- make_plot_df(results$top_m7)
+  plot_m8 <- make_plot_df(results$top_m8)
+  
+  bar_plot <- function(df, collection) {
+    ggplot(df, aes(x = pathway, y = NES, fill = direction)) +
+      geom_col() +
+      coord_flip() +
+      labs(title = paste("Top enriched", collection, "pathways at Day", day_label),
+           x = "Pathway", y = "Normalized Enrichment Score (NES)") +
+      scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+      theme_bw()
+  }
+  
+  dot_plot <- function(df, collection) {
+    ggplot(df, aes(x = NES, y = pathway)) +
+      geom_point(aes(size = size, color = padj)) +
+      scale_color_gradient(low = "tomato", high = "steelblue", trans = "reverse") +
+      labs(title = paste("Top enriched", collection, "pathways at Day", day_label),
+           x = "Normalized Enrichment Score (NES)", y = "Pathway",
+           size = "Gene set size", color = "Adjusted p-value") +
+      theme_bw()
+  }
+  
+  print(bar_plot(plot_m7, "M7"))
+  print(bar_plot(plot_m8, "M8"))
+  print(dot_plot(plot_m7, "M7"))
+  print(dot_plot(plot_m8, "M8"))
+}
+
+
+#============================================================
+# Run all three days
+#============================================================
+output_dir <- "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs"
+
+results_d4 <- run_gsea_day(dds4, "4", pathways_m7, pathways_m8,
+                            msig_m7, msig_m8, output_dir)
+results_d6 <- run_gsea_day(dds6, "6", pathways_m7, pathways_m8,
+                            msig_m7, msig_m8, output_dir)
+results_d11 <- run_gsea_day(dds11, "11", pathways_m7, pathways_m8,
+                             msig_m7, msig_m8, output_dir)
+
+
+#============================================================
+# Plot all three days
+#============================================================
+plot_gsea_day(results_d4, "4")
+plot_gsea_day(results_d6, "6")
+plot_gsea_day(results_d11, "11")
+```
+
+
+
+
+#GSEAS function for KEGG
+```{r}
+run_kegg_day <- function(rank, day_label, output_dir) {
+  
+  # Convert symbols to Entrez IDs
+  gene_df <- bitr(names(rank), fromType = "SYMBOL",
+                  toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+  gene_df <- gene_df[!duplicated(gene_df$SYMBOL), ]  # remove duplicate mappings
+  
+  # Diagnostics
+  cat("\n=== KEGG Day", day_label, "===\n")
+  cat("Total genes:", length(rank), "\n")
+  cat("Matched:", nrow(gene_df), "\n")
+  cat("Unmatched:", length(rank) - nrow(gene_df), "\n")
+  
+  # Build Entrez-named rank vector
+  rank_kegg <- rank[gene_df$SYMBOL]
+  names(rank_kegg) <- gene_df$ENTREZID
+  rank_kegg <- sort(rank_kegg, decreasing = TRUE)
+  
+  # Run gseKEGG
+  gsea_kegg <- gseKEGG(
+    geneList     = rank_kegg,
+    organism     = "mmu",
+    minGSSize    = 10,
+    pvalueCutoff = 0.05,
+    eps          = 0,
+    pAdjustMethod = "BH"
+  )
+  
+  # Convert to data frame
+  kegg_df <- as.data.frame(gsea_kegg) %>%
+    dplyr::arrange(p.adjust) %>%
+    dplyr::select(Description, NES, p.adjust, setSize)
+  
+  # Write CSVs
+  write.csv(kegg_df,
+            file.path(output_dir, paste0("kegg_day", day_label, "_clean.csv")),
+            row.names = FALSE)
+  write.csv(kegg_df %>% slice_head(n = 10),
+            file.path(output_dir, paste0("kegg_day", day_label, "_top10.csv")),
+            row.names = FALSE)
+  
+  # Top 10 up/down for plotting
+  top_up   <- kegg_df %>% dplyr::filter(NES > 0) %>%
+    dplyr::arrange(desc(NES)) %>% dplyr::slice_head(n = 10)
+  top_down <- kegg_df %>% dplyr::filter(NES < 0) %>%
+    dplyr::arrange(NES) %>% dplyr::slice_head(n = 10)
+  
+  plot_df <- bind_rows(top_up, top_down) %>%
+    dplyr::mutate(direction = ifelse(NES > 0, "Positive", "Negative"),
+                  Description = reorder(Description, NES))
+  
+  list(kegg_df = kegg_df, plot_df = plot_df)
+}
+
+
+plot_kegg_day <- function(results, day_label) {
+  
+  bar <- ggplot(results$plot_df, aes(x = Description, y = NES, fill = direction)) +
+    geom_col() + coord_flip() +
+    labs(title = paste("Top enriched KEGG pathways at Day", day_label),
+         x = "Pathway", y = "Normalized Enrichment Score (NES)") +
+    scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+    theme_bw()
+  
+  dot <- ggplot(results$plot_df, aes(x = NES, y = Description)) +
+    geom_point(aes(size = setSize, color = p.adjust)) +
+    scale_color_gradient(low = "tomato", high = "steelblue", trans = "reverse") +
+    labs(title = paste("Top enriched KEGG pathways at Day", day_label),
+         x = "Normalized Enrichment Score (NES)", y = "Pathway",
+         size = "Gene set size", color = "Adjusted p-value") +
+    theme_bw()
+  
+  print(bar)
+  print(dot)
+}
+
+
+# Run all three days
+output_dir <- "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs"
+
+kegg_d4  <- run_kegg_day(results_d4$rank,  "4",  output_dir)
+kegg_d6  <- run_kegg_day(results_d6$rank,  "6",  output_dir)
+kegg_d11 <- run_kegg_day(results_d11$rank, "11", output_dir)
+
+plot_kegg_day(kegg_d4,  "4")
+plot_kegg_day(kegg_d6,  "6")
+plot_kegg_day(kegg_d11, "11")
+```
+
+
+

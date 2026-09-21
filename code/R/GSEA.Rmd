@@ -1,0 +1,1815 @@
+---
+title: "GSEA"
+author: "Esther Zhou"
+date: "2026-04-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(fgsea)
+library(DESeq2)
+library(msigdbr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(KEGGREST)
+library(pheatmap)
+library(tidyr)
+```
+
+#Load Dataset and exclude M52_D4
+```{r}
+dds_mouse <- readRDS("/work/users/x/c/xczhou/Chlamydia/processed/dds_mouse.rds")
+sample_info <- readRDS("/work/users/x/c/xczhou/Chlamydia/processed/sample_info.rds")
+dds_mouse_filtered <- dds_mouse[, !(colnames(dds_mouse) %in% c("M52_D4"))]
+
+```
+
+#Run DESeq2 to get a ranking statistics for day 4, 6, and 11
+```{r message=FALSE, warning=FALSE}
+dds4 <- dds_mouse_filtered[, dds_mouse_filtered$day==4]
+
+# Remove genes with all zero counts in Day 4 samples
+dds4 <- dds4[which(rowSums(dds4@assays@data@listData[["counts"]]) != 0),]
+dds4
+
+# Set group reference level
+dds4$group <- factor(dds4$group, levels=c("Naive","Vaccinated"))
+#Model gene expression as a function of group
+design(dds4) <- ~ group
+dds4 <- DESeq(dds4)
+
+
+#Day 6
+dds6 <- dds_mouse_filtered[, dds_mouse_filtered$day==6]
+dds6 <- dds6[which(rowSums(dds6@assays@data@listData[["counts"]]) != 0),]
+dds6$group <- factor(dds6$group, levels=c("Naive","Vaccinated"))
+design(dds6) <- ~ group
+dds6 <- DESeq(dds6)
+
+#Day 11
+dds11 <- dds_mouse_filtered[, dds_mouse_filtered$day==11]
+dds11 <- dds11[which(rowSums(dds11@assays@data@listData[["counts"]]) != 0),]
+dds11$group <- factor(dds11$group, levels=c("Naive","Vaccinated"))
+design(dds11) <- ~ group
+dds11 <- DESeq(dds11)
+
+```
+
+
+#Rank the genes based on their stat day4
+```{r}
+#extract stat
+res_d4 <- results(dds4, contrast = c("group", "Vaccinated", "Naive"))
+
+# ranked list for GSEA
+rank_d4 <- res_d4$stat
+names(rank_d4) <- rownames(res_d4)
+
+# remove NA and sort decreasing
+rank_d4 <- rank_d4[!is.na(rank_d4)]
+rank_d4 <- sort(rank_d4, decreasing = TRUE)
+
+#Make sure gene names match MSigDB format
+head(rownames(dds4))
+#Check for duplicated gene names
+sum(duplicated(names(rank_d4)))
+#Check for infinite values
+sum(!is.finite(rank_d4))
+```
+
+#Rank the genes based on their stat day6
+```{r}
+#extract stat
+res_d6 <- results(dds6, contrast = c("group", "Vaccinated", "Naive"))
+
+# ranked list for GSEA
+rank_d6 <- res_d6$stat
+names(rank_d6) <- rownames(res_d6)
+
+# remove NA and sort decreasing
+rank_d6 <- rank_d6[!is.na(rank_d6)]
+rank_d6 <- sort(rank_d6, decreasing = TRUE)
+
+#Make sure gene names match MSigDB format
+head(rownames(dds6))
+#Check for duplicated gene names
+sum(duplicated(names(rank_d6)))
+#Check for infinite values
+sum(!is.finite(rank_d6))
+```
+
+#Rank the genes based on their stat day11
+
+```{r}
+#extract stat
+res_d11 <- results(dds11, contrast = c("group", "Vaccinated", "Naive"))
+
+# ranked list for GSEA
+rank_d11 <- res_d11$stat
+names(rank_d11) <- rownames(res_d11)
+
+# remove NA and sort decreasing
+rank_d11 <- rank_d11[!is.na(rank_d11)]
+rank_d11 <- sort(rank_d11, decreasing = TRUE)
+
+#Make sure gene names match MSigDB format
+head(rownames(dds11))
+#Check for duplicated gene names
+sum(duplicated(names(rank_d11)))
+#Check for infinite values
+sum(!is.finite(rank_d11))
+```
+
+#Create KEGG mouse pathway list
+```{r}
+# Pull KEGG mouse pathway-gene links
+kegg_links <- KEGGREST::keggLink("pathway", "mmu")
+
+kegg_df <- data.frame(
+  entrez_id  = sub("mmu:", "", names(kegg_links)),
+  pathway_id = sub("path:", "", as.character(kegg_links))
+)
+
+# Pull KEGG pathway names
+kegg_names <- KEGGREST::keggList("pathway", "mmu")
+
+kegg_name_df <- data.frame(
+  pathway_id   = sub("path:", "", names(kegg_names)),
+  pathway_name = as.character(kegg_names)
+)
+
+# Add readable pathway names
+kegg_df <- kegg_df %>%
+  left_join(kegg_name_df, by = "pathway_id") %>%
+  filter(!is.na(pathway_name))
+
+# Build KEGG pathway list
+pathways_kegg_entrez <- split(kegg_df$entrez_id, kegg_df$pathway_name)
+
+
+#Convert ranked vector from SYMBOL to ENTREZ
+convert_rank_to_entrez <- function(rank) {
+  
+  gene_df <- bitr(
+    names(rank),
+    fromType = "SYMBOL",
+    toType   = "ENTREZID",
+    OrgDb    = org.Mm.eg.db
+  )
+  
+  gene_df <- gene_df %>%
+    mutate(stat = rank[SYMBOL]) %>%
+    filter(!is.na(stat), !is.na(ENTREZID)) %>%
+    group_by(ENTREZID) %>%
+    slice_max(order_by = abs(stat), n = 1, with_ties = FALSE) %>%
+    ungroup()
+  
+  rank_entrez <- gene_df$stat
+  names(rank_entrez) <- gene_df$ENTREZID
+  
+  sort(rank_entrez, decreasing = TRUE)
+}
+
+rank_d4_entrez  <- convert_rank_to_entrez(rank_d4)
+rank_d6_entrez  <- convert_rank_to_entrez(rank_d6)
+rank_d11_entrez <- convert_rank_to_entrez(rank_d11)
+```
+
+#Retrieve the collections of genes from MSigDB
+```{r}
+#Pull the mouse M7 nad M8 gene sets
+msig_m7 <- msigdbr(
+  db_species = "MM",
+  species = "Mus musculus",
+  collection = "M7"
+)
+
+msig_m8 <- msigdbr(
+  db_species = "MM",
+  species = "Mus musculus",
+  collection = "M8"
+)
+
+#Turn them into pathway lists
+# .$ means take the data coming from the pipe (%>%) and use it here
+pathways_m7 <- msig_m7 %>%
+  split(x = .$gene_symbol, f = .$gs_name)
+pathways_m8 <- msig_m8 %>%
+  split(x = .$gene_symbol, f = .$gs_name)
+
+```
+
+#Reactome gene list
+```{r}
+reactome_df <- msigdbr(
+  species = "Mus musculus",
+  collection = "C2",
+  subcollection = "CP:REACTOME"
+)
+
+pathways_reactome <- reactome_df %>%
+  split(x = .$gene_symbol, f = .$gs_name)
+
+```
+
+
+#GSEA Function
+```{r}
+run_fgsea_analysis <- function(rank_list,
+                               pathways,
+                               collection_name,   # e.g. "M7", "M8", "KEGG", "Reactome"
+                               day_label,         # e.g. "Day4", "Day6"
+                               output_dir,
+                               min_size = 10,
+                               max_size = 500,
+                               padj_cutoff = 0.05,
+                               seed = 42) {
+  
+  # Overlap check
+  all_pathway_genes <- unique(unlist(pathways))
+  pct_overlap <- round(sum(names(rank_list) %in% all_pathway_genes) / length(rank_list) * 100, 1)
+  cat(collection_name, day_label, "- gene overlap:", pct_overlap, "%\n")
+  
+  # Run fgsea
+  set.seed(seed)
+  result <- fgsea(
+    pathways = pathways,
+    stats    = rank_list,
+    minSize  = min_size,
+    maxSize  = max_size
+  ) %>% arrange(padj)
+  
+  # Summary
+  n_sig <- sum(result$padj < padj_cutoff, na.rm = TRUE)
+  cat(collection_name, day_label, ":",
+      n_sig, "/", nrow(result), "pathways significant (",
+      round(n_sig / nrow(result) * 100, 1), "%)\n\n")
+  
+  # Collapse leadingEdge for export
+  result_out <- result %>%
+    mutate(leadingEdge = sapply(leadingEdge, paste, collapse = ";"))
+  
+  result_sig_out <- result_out %>%
+    filter(padj < padj_cutoff)
+  
+  # Write CSVs
+  file_prefix <- file.path(output_dir, paste0("fgsea_", tolower(collection_name), "_", tolower(day_label)))
+  
+# Clean output table
+result_out_clean <- result_out %>%
+  mutate(
+    direction = ifelse(NES > 0, "Positive", "Negative")
+  ) %>%
+  dplyr::select(pathway, direction, NES, padj, size, leadingEdge)
+
+result_sig_out_clean <- result_out_clean %>%
+  filter(padj < padj_cutoff)
+
+write.csv(
+  result_sig_out_clean,
+  file = paste0(file_prefix, "_sig.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  result_out_clean,
+  file = paste0(file_prefix, "_all.csv"),
+  row.names = FALSE
+)
+  
+  # Return the raw result (list columns intact) for plotting
+  return(result)
+}
+
+# ── Top pathway extractor ───────────────────────────────────────────────
+get_top_pathways <- function(fgsea_result, n = 10, padj_cutoff = 0.05) {
+  
+  # Convert data.table to data.frame to avoid dplyr conflicts
+  fgsea_result <- as.data.frame(fgsea_result)
+  
+  sig <- fgsea_result %>%
+    filter(padj < padj_cutoff) %>%
+    mutate(leadingEdge = sapply(leadingEdge, paste, collapse = ";"))
+  
+  up <- sig %>%
+    filter(NES > 0) %>%
+    arrange(desc(NES)) %>%
+    dplyr::select(pathway, NES, ES, pval, padj, size, leadingEdge) %>%
+    slice_head(n = n)
+  
+  down <- sig %>%
+    filter(NES < 0) %>%
+    arrange(NES) %>%
+    dplyr::select(pathway, NES, ES, pval, padj, size, leadingEdge) %>%
+    slice_head(n = n)
+  
+  list(up = up, down = down)
+}
+
+
+# ── Plotting function ───────────────────────────────────────────────────
+plot_top_pathways <- function(top_pathways,
+                               collection_name,
+                               day_label,
+                               output_dir,
+                               plot_type = "both") {  # "bar", "dot", or "both"
+  
+  # Combine up and down
+  plot_df <- bind_rows(top_pathways$up, top_pathways$down) %>%
+    mutate(
+      direction  = ifelse(NES > 0, "Positive", "Negative"),
+      pathway    = reorder(pathway, NES),
+      log10padj  = -log10(padj)
+    )
+  
+  if (nrow(plot_df) == 0) {
+    cat("No significant pathways for", collection_name, day_label, "- skipping plot\n")
+    return(invisible(NULL))
+  }
+  
+  title_base <- paste("Top enriched", collection_name, "pathways at", day_label)
+  file_prefix <- file.path(output_dir, paste0("gsea_", tolower(collection_name), "_", tolower(day_label)))
+  
+  # ── Bar plot ──
+  if (plot_type %in% c("bar", "both")) {
+    p_bar <- ggplot(plot_df, aes(x = pathway, y = NES, fill = direction)) +
+      geom_col() +
+      coord_flip() +
+      scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+      labs(
+        title = title_base,
+        x     = "Pathway",
+        y     = "Normalized Enrichment Score (NES)",
+        fill  = "Direction"
+      ) +
+      theme_bw() +
+      theme(
+        plot.title   = element_text(face = "bold", size = 11),
+        axis.text.y  = element_text(size = 8),
+        legend.position = "bottom"
+      )
+    
+    ggsave(paste0(file_prefix, "_barplot.pdf"), p_bar, width = 10, height = 7)
+    ggsave(paste0(file_prefix, "_barplot.png"), p_bar, width = 10, height = 7, dpi = 300)
+  }
+  
+  # ── Dot plot ──
+  if (plot_type %in% c("dot", "both")) {
+    p_dot <- ggplot(plot_df, aes(x = NES, y = pathway)) +
+      geom_point(aes(size = size, color = padj)) +
+      scale_color_gradient(low = "darkblue", high = "lightblue") +
+      geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+      labs(
+        title  = title_base,
+        x      = "Normalized Enrichment Score (NES)",
+        y      = "Pathway",
+        size   = "Gene set size",
+        color  = "Adjusted p-value"
+      ) +
+      theme_bw() +
+      theme(
+        plot.title   = element_text(face = "bold", size = 11),
+        axis.text.y  = element_text(size = 8),
+        legend.position = "right"
+      )
+    
+    ggsave(paste0(file_prefix, "_dotplot.pdf"), p_dot, width = 10, height = 7)
+    ggsave(paste0(file_prefix, "_dotplot.png"), p_dot, width = 10, height = 7, dpi = 300)
+  }
+  
+  cat("Saved plots for", collection_name, day_label, "\n")
+  invisible(list(bar = p_bar, dot = p_dot))
+}
+
+
+# ── Heatmap function ────────────────────────────────────────────────────
+plot_gsea_heatmap <- function(fgsea_list,
+                               collection_name,
+                               output_dir,
+                               padj_cutoff = 0.05,
+                               top_n = 30,
+                               value = "NES") {
+  
+  # Find union of top significant pathways across all days
+  top_pathways <- lapply(fgsea_list, function(res) {
+    res %>%
+      as.data.frame() %>%
+      filter(padj < padj_cutoff) %>%
+      arrange(padj) %>%
+      slice_head(n = top_n) %>%
+      pull(pathway)
+  })
+  selected_pathways <- unique(unlist(top_pathways))
+  
+  if (length(selected_pathways) == 0) {
+    cat("No significant pathways for", collection_name, "- skipping heatmap\n")
+    return(invisible(NULL))
+  }
+  
+  # Build long format
+  heatmap_df <- lapply(names(fgsea_list), function(day) {
+    fgsea_list[[day]] %>%
+      as.data.frame() %>%
+      filter(pathway %in% selected_pathways) %>%
+      mutate(
+        day      = day,
+        plot_val = if (value == "NES") NES else -log10(padj)
+      ) %>%
+      dplyr::select(pathway, day, plot_val)
+  }) %>%
+    bind_rows()
+  
+  # Reshape to wide format
+  mat_df <- reshape(
+    heatmap_df,
+    idvar     = "pathway",
+    timevar   = "day",
+    direction = "wide"
+  )
+  colnames(mat_df) <- sub("plot_val\\.", "", colnames(mat_df))
+  
+  # Convert to matrix                      ← only ONE matrix block
+  mat <- as.matrix(mat_df[, -1])
+  rownames(mat) <- mat_df$pathway
+  mat[is.na(mat)] <- 0
+  
+  # Shorten long pathway names
+  rownames(mat) <- stringr::str_trunc(rownames(mat), width = 60)
+  
+# Color scale
+  if (value == "NES") {
+    max_val       <- max(abs(mat), na.rm = TRUE)
+    breaks        <- seq(-max_val, max_val, length.out = 101)
+    colors        <- colorRampPalette(c("tomato", "white", "steelblue"))(100)
+    legend_breaks <- c(-max_val, 0, max_val)
+    legend_labels <- c("Negative", "0", "Positive")
+  } else {
+    max_val       <- max(mat, na.rm = TRUE)
+    breaks        <- seq(0, max_val, length.out = 101)
+    colors        <- colorRampPalette(c("white", "darkblue"))(100)
+    legend_breaks <- round(seq(0, max_val, length.out = 5), 1)
+    legend_labels <- as.character(legend_breaks)
+  }
+  
+  # Shared pheatmap arguments
+  heatmap_args <- list(
+    mat,
+    color         = colors,
+    breaks        = breaks,
+    cluster_cols  = FALSE,
+    cluster_rows  = TRUE,
+    fontsize_row  = 8,
+    fontsize_col  = 10,
+    main          = title,
+    border_color  = NA,
+    angle_col     = 0,
+    legend_breaks = legend_breaks,
+    legend_labels = legend_labels
+  )
+  
+  title       <- paste(collection_name, "pathway enrichment across timepoints -", value)
+  file_prefix <- file.path(output_dir, paste0("heatmap_", tolower(collection_name), "_", tolower(value)))
+  
+  # Shared pheatmap arguments
+  heatmap_args <- list(
+    mat,
+    color        = colors,
+    breaks       = breaks,
+    cluster_cols = FALSE,
+    cluster_rows = TRUE,
+    fontsize_row = 8,
+    fontsize_col = 10,
+    main         = title,
+    border_color = NA,
+    angle_col    = 0,
+    legend_breaks = if (value == "NES") c(-max_val, 0, max_val) else waiver(),
+    legend_labels = if (value == "NES") c("Negative", "0", "Positive") else waiver()
+  )
+  
+  # Save PDF
+  pdf(paste0(file_prefix, ".pdf"), width = 10, height = max(6, length(selected_pathways) * 0.25))
+  do.call(pheatmap::pheatmap, heatmap_args)
+  dev.off()
+  
+  # Save PNG
+  png(paste0(file_prefix, ".png"), width = 10, height = max(6, length(selected_pathways) * 0.25),
+      units = "in", res = 300)
+  do.call(pheatmap::pheatmap, heatmap_args)
+  dev.off()
+  
+  cat("Saved heatmap for", collection_name, value, "\n")
+}
+
+
+#--------genes represented in the enriched M7 gene sets-------------------------
+  add_pathway_gene_info <- function(fgsea_result, pathways, rank_list, padj_cutoff = 0.05) {
+  
+  result_out <- fgsea_result %>%
+    as.data.frame() %>%
+    filter(padj < padj_cutoff) %>%
+    arrange(padj) %>%
+    mutate(
+      direction = ifelse(NES > 0, "Positive", "Negative"),
+      
+      # all pathway genes that are present in your ranked gene list
+      pathway_genes_in_data = sapply(pathway, function(p) {
+        genes <- intersect(pathways[[p]], names(rank_list))
+        paste(genes, collapse = ";")
+      }),
+      
+      n_pathway_genes_in_data = sapply(pathway, function(p) {
+        length(intersect(pathways[[p]], names(rank_list)))
+      }),
+      
+      # leading-edge genes from fgsea
+      leadingEdge = sapply(leadingEdge, paste, collapse = ";"),
+      n_leadingEdge = ifelse(
+        leadingEdge == "",
+        0,
+        lengths(strsplit(leadingEdge, ";"))
+      )
+    ) %>%
+    dplyr::select(
+      pathway,
+      direction,
+      NES,
+      padj,
+      size,
+      n_pathway_genes_in_data,
+      pathway_genes_in_data,
+      n_leadingEdge,
+      leadingEdge
+    )
+  
+  return(result_out)
+}
+```
+
+
+```{r}
+output_dir <- "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/GSEA"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Day 4
+fgsea_m7_d4       <- run_fgsea_analysis(rank_d4,        pathways_m7,           "M7",       "Day4",  output_dir)
+fgsea_m8_d4       <- run_fgsea_analysis(rank_d4,        pathways_m8,           "M8",       "Day4",  output_dir)
+fgsea_kegg_d4     <- run_fgsea_analysis(rank_d4_entrez, pathways_kegg_entrez,  "KEGG",     "Day4",  output_dir)
+fgsea_reactome_d4 <- run_fgsea_analysis(rank_d4,        pathways_reactome,     "Reactome", "Day4",  output_dir)
+
+# Day 6
+fgsea_m7_d6       <- run_fgsea_analysis(rank_d6,        pathways_m7,           "M7",       "Day6",  output_dir)
+fgsea_m8_d6       <- run_fgsea_analysis(rank_d6,        pathways_m8,           "M8",       "Day6",  output_dir)
+fgsea_kegg_d6     <- run_fgsea_analysis(rank_d6_entrez, pathways_kegg_entrez,  "KEGG",     "Day6",  output_dir)
+fgsea_reactome_d6 <- run_fgsea_analysis(rank_d6,        pathways_reactome,     "Reactome", "Day6",  output_dir)
+
+# Day 11
+fgsea_m7_d11       <- run_fgsea_analysis(rank_d11,        pathways_m7,          "M7",       "Day11", output_dir)
+fgsea_m8_d11       <- run_fgsea_analysis(rank_d11,        pathways_m8,          "M8",       "Day11", output_dir)
+fgsea_kegg_d11     <- run_fgsea_analysis(rank_d11_entrez, pathways_kegg_entrez, "KEGG",     "Day11", output_dir)
+fgsea_reactome_d11 <- run_fgsea_analysis(rank_d11,        pathways_reactome,    "Reactome", "Day11", output_dir)
+
+# ── Extract top pathways for plotting ──────────────────────────────────
+top_m7_d4  <- get_top_pathways(fgsea_m7_d4)
+top_m8_d4  <- get_top_pathways(fgsea_m8_d4)
+top_m7_d6  <- get_top_pathways(fgsea_m7_d6)
+top_m8_d6  <- get_top_pathways(fgsea_m8_d6)
+top_m7_d11 <- get_top_pathways(fgsea_m7_d11)
+top_m8_d11 <- get_top_pathways(fgsea_m8_d11)
+
+top_kegg_d4      <- get_top_pathways(fgsea_kegg_d4)
+top_kegg_d6      <- get_top_pathways(fgsea_kegg_d6)
+top_kegg_d11     <- get_top_pathways(fgsea_kegg_d11)
+
+top_reactome_d4  <- get_top_pathways(fgsea_reactome_d4)
+top_reactome_d6  <- get_top_pathways(fgsea_reactome_d6)
+top_reactome_d11 <- get_top_pathways(fgsea_reactome_d11)
+
+# Access like:
+top_m7_d4$up
+top_m7_d4$down
+
+
+# ── Generate all plots ─────────────────────────────────────────────────
+plot_dir <- file.path(output_dir, "plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Day 4
+plot_top_pathways(top_m7_d4,       "M7",       "Day4",  plot_dir)
+plot_top_pathways(top_m8_d4,       "M8",       "Day4",  plot_dir)
+plot_top_pathways(top_kegg_d4,     "KEGG",     "Day4",  plot_dir)
+plot_top_pathways(top_reactome_d4, "Reactome", "Day4",  plot_dir)
+
+# Day 6
+plot_top_pathways(top_m7_d6,       "M7",       "Day6",  plot_dir)
+plot_top_pathways(top_m8_d6,       "M8",       "Day6",  plot_dir)
+plot_top_pathways(top_kegg_d6,     "KEGG",     "Day6",  plot_dir)
+plot_top_pathways(top_reactome_d6, "Reactome", "Day6",  plot_dir)
+
+# Day 11
+plot_top_pathways(top_m7_d11,       "M7",       "Day11", plot_dir)
+plot_top_pathways(top_m8_d11,       "M8",       "Day11", plot_dir)
+plot_top_pathways(top_kegg_d11,     "KEGG",     "Day11", plot_dir)
+plot_top_pathways(top_reactome_d11, "Reactome", "Day11", plot_dir)
+
+
+
+# Package fgsea results by day for each collection
+m7_by_day       <- list(Day4 = fgsea_m7_d4,       Day6 = fgsea_m7_d6,       Day11 = fgsea_m7_d11)
+m8_by_day       <- list(Day4 = fgsea_m8_d4,       Day6 = fgsea_m8_d6,       Day11 = fgsea_m8_d11)
+kegg_by_day     <- list(Day4 = fgsea_kegg_d4,     Day6 = fgsea_kegg_d6,     Day11 = fgsea_kegg_d11)
+reactome_by_day <- list(Day4 = fgsea_reactome_d4, Day6 = fgsea_reactome_d6, Day11 = fgsea_reactome_d11)
+
+# NES heatmaps
+plot_gsea_heatmap(m7_by_day,       "M7",       plot_dir, value = "NES")
+plot_gsea_heatmap(m8_by_day,       "M8",       plot_dir, value = "NES")
+plot_gsea_heatmap(kegg_by_day,     "KEGG",     plot_dir, value = "NES")
+plot_gsea_heatmap(reactome_by_day, "Reactome", plot_dir, value = "NES")
+
+# Significance heatmaps
+plot_gsea_heatmap(m7_by_day,       "M7",       plot_dir, value = "log10padj")
+plot_gsea_heatmap(m8_by_day,       "M8",       plot_dir, value = "log10padj")
+plot_gsea_heatmap(kegg_by_day,     "KEGG",     plot_dir, value = "log10padj")
+plot_gsea_heatmap(reactome_by_day, "Reactome", plot_dir, value = "log10padj")
+
+```
+```{r}
+library(writexl)
+m7_d4_genes <- add_pathway_gene_info(
+  fgsea_result = fgsea_m7_d4,
+  pathways = pathways_m7,
+  rank_list = rank_d4
+)
+
+m7_d6_genes <- add_pathway_gene_info(
+  fgsea_result = fgsea_m7_d6,
+  pathways = pathways_m7,
+  rank_list = rank_d6
+)
+
+m7_d11_genes <- add_pathway_gene_info(
+  fgsea_result = fgsea_m7_d11,
+  pathways = pathways_m7,
+  rank_list = rank_d11
+)
+
+write_xlsx(
+  list(
+    Day4_M7 = m7_d4_genes,
+    Day6_M7 = m7_d6_genes,
+    Day11_M7 = m7_d11_genes
+  ),
+  path = file.path(output_dir, "M7_significant_pathways_with_genes.xlsx")
+)
+```
+
+
+#GSEA of M7 and M8 on Day 4
+```{r}
+# More informative overlap check
+pct_m7 <- round(sum(names(rank_d4) %in% unique(msig_m7$gene_symbol)) / length(rank_d4) * 100, 1)
+pct_m8 <- round(sum(names(rank_d4) %in% unique(msig_m8$gene_symbol)) / length(rank_d4) * 100, 1)
+
+cat("Ranked genes overlapping M7:", pct_m7, "%\n")
+cat("Ranked genes overlapping M8:", pct_m8, "%\n")
+
+# Run GSEA
+set.seed(42)
+fgsea_m7_d4 <- fgsea(
+  pathways = pathways_m7,
+  stats = rank_d4,
+  minSize = 10,
+  maxSize = 500
+)
+
+set.seed(42)
+fgsea_m8_d4 <- fgsea(
+  pathways = pathways_m8,
+  stats = rank_d4,
+  minSize = 10,
+  maxSize = 500
+)
+
+#Sort by padj values
+fgsea_m7_d4 <- fgsea_m7_d4 %>% arrange(padj)
+fgsea_m8_d4 <- fgsea_m8_d4 %>% arrange(padj)
+
+#Inspecting significant pathways
+# total pathways tested
+n_total_m7d4 <- nrow(fgsea_m7_d4)
+n_total_m8d4 <- nrow(fgsea_m8_d4)
+
+# significant pathways (BH adjusted)
+n_sig_m7d4 <- sum(fgsea_m7_d4$padj < 0.05, na.rm = TRUE)
+n_sig_m8d4 <- sum(fgsea_m8_d4$padj < 0.05, na.rm = TRUE)
+
+cat("M7 Day 4:",
+    n_sig_m7d4, "/", n_total_m7d4,
+    "pathways significant (",
+    round(n_sig_m7d4 / n_total_m7d4 * 100, 1), "% )\n")
+
+cat("M8 Day 4:",
+    n_sig_m8d4, "/", n_total_m8d4,
+    "pathways significant (",
+    round(n_sig_m8d4 / n_total_m8d4 * 100, 1), "% )\n")
+
+
+#Significant only dataset for plotting
+fgsea_m7_d4_sig <- fgsea_m7_d4 %>%
+  dplyr::filter(padj < 0.05)
+
+fgsea_m8_d4_sig <- fgsea_m8_d4 %>%
+  dplyr::filter(padj < 0.05)
+
+# Collapse leadingEdge before selecting/exporting
+fgsea_m7_d4_out <- fgsea_m7_d4 %>%
+  mutate(leadingEdge = sapply(leadingEdge, paste, collapse = ";"))
+
+fgsea_m8_d4_out <- fgsea_m8_d4 %>%
+  mutate(leadingEdge = sapply(leadingEdge, paste, collapse = ";"))
+
+fgsea_m7_d4_sig_out <- fgsea_m7_d4_sig %>%
+  mutate(leadingEdge = sapply(leadingEdge, paste, collapse = ";"))
+
+fgsea_m8_d4_sig_out <- fgsea_m8_d4_sig %>%
+  mutate(leadingEdge = sapply(leadingEdge, paste, collapse = ";"))
+
+# Top 10 positively and negatively enriched pathways M7
+top_m7_up <- fgsea_m7_d4_sig_out %>%
+  filter(NES > 0) %>%
+  arrange(desc(NES)) %>%
+  select(pathway, NES, ES, pval, padj, size, leadingEdge) %>%
+  slice_head(n = 10)
+
+top_m7_down <- fgsea_m7_d4_sig_out %>%
+  filter(NES < 0) %>%
+  arrange(NES) %>%
+  select(pathway, NES, ES, pval, padj, size, leadingEdge) %>%
+  slice_head(n = 10)
+
+# Top 10 positively and negatively enriched pathways M8
+top_m8_up <- fgsea_m8_d4_sig_out %>%
+  filter(NES > 0) %>%
+  arrange(desc(NES)) %>%
+  select(pathway, NES, ES, pval, padj, size, leadingEdge) %>%
+  slice_head(n = 10)
+
+top_m8_down <- fgsea_m8_d4_sig_out %>%
+  filter(NES < 0) %>%
+  arrange(NES) %>%
+  select(pathway, NES, ES, pval, padj, size, leadingEdge) %>%
+  slice_head(n = 10)
+
+# Output only significant pathways
+write.csv(
+  fgsea_m7_d4_sig_out[, c("pathway", "NES", "ES", "pval", "padj", "size", "leadingEdge")],
+  file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m7_day4_sig.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  fgsea_m8_d4_sig_out[, c("pathway", "NES", "ES", "pval", "padj", "size", "leadingEdge")],
+  file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m8_day4_sig.csv",
+  row.names = FALSE
+)
+
+# Output all pathways
+write.csv(
+  fgsea_m7_d4_out[, c("pathway", "NES", "ES", "pval", "padj", "size", "leadingEdge")],
+  file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m7_day4_clean.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  fgsea_m8_d4_out[, c("pathway", "NES", "ES", "pval", "padj", "size", "leadingEdge")],
+  file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m8_day4_clean.csv",
+  row.names = FALSE
+)
+```
+
+#Figures for GSEA results of M7 and M8 on day 4
+```{r}
+#Prepare dataset
+plot_m7 <- bind_rows(top_m7_up, top_m7_down) %>%
+  mutate(
+    direction = ifelse(NES > 0, "Positive", "Negative"),
+    pathway = reorder(pathway, NES)
+  )
+
+plot_m8 <- bind_rows(top_m8_up, top_m8_down) %>%
+  mutate(
+    direction = ifelse(NES > 0, "Positive", "Negative"),
+    pathway = reorder(pathway, NES)
+  )
+
+#Barplots
+ggplot(plot_m7, aes(x = pathway, y = NES, fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top enriched M7 pathways at Day 4",
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+  theme_bw()
+
+
+ggplot(plot_m8, aes(x = pathway, y = NES, fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top enriched M8 pathways at Day 4",
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+  theme_bw()
+
+#Dotplots
+ggplot(plot_m7, aes(x = NES, y = pathway)) +
+  geom_point(aes(size = size, color = padj)) +
+  scale_color_gradient(low = "darkblue", high = "lightblue") +
+  labs(
+    title = "Top enriched M7 pathways at Day 4",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway",
+    size = "Gene set size",
+    color = "Adjusted p-value"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_text(size = 8),   # pathway names can get cramped
+    legend.position = "right",
+    plot.title = element_text(face = "bold")) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50")  # reference line at NES = 0
+
+ggplot(plot_m8, aes(x = NES, y = pathway)) +
+  geom_point(aes(size = size, color = padj)) +
+  scale_color_gradient(low = "darkblue", high = "lightblue") +
+  labs(
+    title = "Top enriched M8 pathways at Day 4",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway",
+    size = "Gene set size",
+    color = "Adjusted p-value"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_text(size = 8),   # pathway names can get cramped
+    legend.position = "right",
+    plot.title = element_text(face = "bold")) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50")  # reference line at NES = 0
+
+
+```
+
+
+#GSEA of M7 and M8 on Day 6
+```{r}
+#extract stat
+res_d6 <- results(dds6, contrast = c("group", "Vaccinated", "Naive"))
+
+# ranked list for GSEA
+rank_d6 <- res_d6$stat
+names(rank_d6) <- rownames(res_d6)
+
+# remove NA and sort decreasing
+rank_d6 <- rank_d6[!is.na(rank_d6)]
+rank_d6 <- sort(rank_d6, decreasing = TRUE)
+
+#Make sure gene names match MSigDB format
+head(rownames(dds6))
+#Check for duplicated gene names
+sum(duplicated(names(rank_d6)))
+#Check for infinite values
+sum(!is.finite(rank_d6))
+
+#Check if the ranked genes overlap with the gene sets
+sum(names(rank_d6) %in% unique(msig_m7$gene_symbol))
+sum(names(rank_d6) %in% unique(msig_m8$gene_symbol))
+
+#Run GSEA
+fgsea_m7_d6 <- fgsea(
+  pathways = pathways_m7,
+  stats = rank_d6,
+  minSize = 10,
+  maxSize = 500
+)
+
+fgsea_m8_d6 <- fgsea(
+  pathways = pathways_m8,
+  stats = rank_d6,
+  minSize = 10,
+  maxSize = 500
+)
+
+
+#Sort by padj values
+fgsea_m7_d6 <- fgsea_m7_d6 %>% arrange(padj)
+fgsea_m8_d6 <- fgsea_m8_d6 %>% arrange(padj)
+
+#Inspecting significant pathways
+# total pathways tested
+n_total_m7d6 <- nrow(fgsea_m7_d6)
+n_total_m8d6 <- nrow(fgsea_m8_d6)
+
+# significant pathways (BH adjusted)
+n_sig_m7d6 <- sum(fgsea_m7_d6$padj < 0.05, na.rm = TRUE)
+n_sig_m8d6 <- sum(fgsea_m8_d6$padj < 0.05, na.rm = TRUE)
+
+# NOT significant pathways
+n_not_sig_m7d6 <- sum(fgsea_m7_d6$padj >= 0.05 | is.na(fgsea_m7_d6$padj))
+n_not_sig_m8d6 <- sum(fgsea_m8_d6$padj >= 0.05 | is.na(fgsea_m8_d6$padj))
+
+n_total_m7d6
+n_sig_m7d6
+n_not_sig_m7d6
+cat("M7 Day 6:",
+    n_sig_m7d6, "/", n_total_m7d6,
+    "pathways significant (",
+    round(n_sig_m7d6 / n_total_m7d6 * 100, 1), "% )\n")
+
+n_total_m8d6
+n_sig_m8d6
+n_not_sig_m8d6
+cat("M8 Day 6:",
+    n_sig_m8d6, "/", n_total_m8d6,
+    "pathways significant (",
+    round(n_sig_m8d6 / n_total_m8d6 * 100, 1), "% )\n")
+
+
+#Significant only dataset for plotting
+fgsea_m7_d6_sig <- fgsea_m7_d6 %>%
+  dplyr::filter(padj < 0.05)
+
+fgsea_m8_d6_sig <- fgsea_m8_d6 %>%
+  dplyr::filter(padj < 0.05)
+
+
+# Top 10 positively and negatively enriched pathways M7
+top_m7d6_up <- fgsea_m7_d6_sig %>%
+  dplyr::filter(NES > 0) %>%
+  dplyr::arrange(desc(NES)) %>%
+  dplyr::select(pathway, NES, padj, size, leadingEdge) %>%
+  dplyr::slice_head(n = 10)
+
+top_m7d6_down <- fgsea_m7_d6_sig %>%
+  dplyr::filter(NES < 0) %>%
+  dplyr::arrange(NES) %>%
+  dplyr::select(pathway, NES, padj, size, leadingEdge) %>%
+  dplyr::slice_head(n = 10)
+
+# Top 10 positively and negatively enriched pathways M8
+top_m8d6_up <- fgsea_m8_d6_sig %>%
+  dplyr::filter(NES > 0) %>%
+  dplyr::arrange(desc(NES)) %>%
+  dplyr::select(pathway, NES, padj, size, leadingEdge) %>%
+  dplyr::slice_head(n = 10)
+
+top_m8d6_down <- fgsea_m8_d6_sig %>%
+  dplyr::filter(NES < 0) %>%
+  dplyr::arrange(NES) %>%
+  dplyr::select(pathway, NES, padj, size, leadingEdge) %>%
+  dplyr::slice_head(n = 10)
+
+
+#Output only significant
+write.csv(fgsea_m7_d6_sig[, c("pathway", "NES", "padj", "size")],
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m7_day6_sig.csv",
+          row.names = FALSE)
+
+write.csv(fgsea_m8_d6_sig[, c("pathway", "NES", "padj", "size")],
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m8_day6_sig.csv",
+          row.names = FALSE)
+
+
+
+write.csv(fgsea_m7_d6[, c("pathway", "NES", "padj", "size")],
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m7_day6_clean.csv",
+          row.names = FALSE)
+
+write.csv(fgsea_m8_d6[, c("pathway", "NES", "padj", "size")],
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m8_day6_clean.csv",
+          row.names = FALSE)
+
+
+plotEnrichment(pathways_m7[["CUI_T_CELL_CD8_IL18_RESPONSE_UP"]], rank_d6)
+```
+
+
+
+#Figures of M7 and M8 on Day 6
+```{r}
+
+#Prepare dataset
+plot_m7d6 <- bind_rows(top_m7d6_up, top_m7d6_down) %>%
+  mutate(
+    direction = ifelse(NES > 0, "Positive", "Negative"),
+    pathway = reorder(pathway, NES)
+  )
+
+plot_m8d6 <- bind_rows(top_m8d6_up, top_m8d6_down) %>%
+  mutate(
+    direction = ifelse(NES > 0, "Positive", "Negative"),
+    pathway = reorder(pathway, NES)
+  )
+
+#Barplots
+ggplot(plot_m7d6, aes(x = pathway, y = NES, fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top enriched M7 pathways at Day 6",
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+  theme_bw()
+
+
+ggplot(plot_m8d6, aes(x = pathway, y = NES, fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top enriched M8 pathways at Day 6",
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+  theme_bw()
+
+#Dotplots
+ggplot(plot_m7d6, aes(x = NES, y = pathway)) +
+  geom_point(aes(size = size, color = padj)) +
+  scale_color_gradient(low = "tomato", high = "steelblue", trans = "reverse") +
+  labs(
+    title = "Top enriched M7 pathways at Day 6",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway",
+    size = "Gene set size",
+    color = "Adjusted p-value"
+  ) +
+  theme_bw()
+
+ggplot(plot_m8d6, aes(x = NES, y = pathway)) +
+  geom_point(aes(size = size, color = padj)) +
+  scale_color_gradient(low = "tomato", high = "steelblue", trans = "reverse") +
+  labs(
+    title = "Top enriched M8 pathways at Day 6",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway",
+    size = "Gene set size",
+    color = "Adjusted p-value"
+  ) +
+  theme_bw()
+```
+
+
+
+
+#GSEA of M7 and M8 on Day 11
+```{r}
+
+#Run GSEA
+fgsea_m7_d11 <- fgsea(
+  pathways = pathways_m7,
+  stats = rank_d11,
+  minSize = 10,
+  maxSize = 500
+)
+
+fgsea_m8_d11 <- fgsea(
+  pathways = pathways_m8,
+  stats = rank_d11,
+  minSize = 10,
+  maxSize = 500
+)
+
+
+#Sort and inspect
+fgsea_m7_d11 <- fgsea_m7_d11 %>% arrange(padj)
+fgsea_m8_d11 <- fgsea_m8_d11 %>% arrange(padj)
+
+
+
+#Inspecting significant pathways
+# total pathways tested
+n_total_m7d11 <- nrow(fgsea_m7_d11)
+n_total_m8d11 <- nrow(fgsea_m8_d11)
+
+# significant pathways (BH adjusted)
+n_sig_m7d11 <- sum(fgsea_m7_d11$padj < 0.05, na.rm = TRUE)
+n_sig_m8d11 <- sum(fgsea_m8_d11$padj < 0.05, na.rm = TRUE)
+
+# NOT significant pathways
+n_not_sig_m7d11 <- sum(fgsea_m7_d11$padj >= 0.05 | is.na(fgsea_m7_d11$padj))
+n_not_sig_m8d11 <- sum(fgsea_m8_d11$padj >= 0.05 | is.na(fgsea_m8_d11$padj))
+
+n_total_m7d11
+n_sig_m7d11
+n_not_sig_m7d11
+cat("M7 Day 11:",
+    n_sig_m7d11, "/", n_total_m7d11,
+    "pathways significant (",
+    round(n_sig_m7d11 / n_total_m7d11 * 100, 1), "% )\n")
+
+n_total_m8d11
+n_sig_m8d11
+n_not_sig_m8d11
+cat("M8 Day 11:",
+    n_sig_m8d11, "/", n_total_m8d11,
+    "pathways significant (",
+    round(n_sig_m8d11 / n_total_m8d11 * 100, 1), "% )\n")
+
+
+#Significant only dataset for plotting
+fgsea_m7_d11_sig <- fgsea_m7_d11 %>%
+  dplyr::filter(padj < 0.05)
+
+fgsea_m8_d11_sig <- fgsea_m8_d11 %>%
+  dplyr::filter(padj < 0.05)
+
+
+# Top 10 positively and negatively enriched pathways M7
+top_m7d11_up <- fgsea_m7_d11_sig %>%
+  dplyr::filter(NES > 0) %>%
+  dplyr::arrange(desc(NES)) %>%
+  dplyr::select(pathway, NES, padj, size, leadingEdge) %>%
+  dplyr::slice_head(n = 10)
+
+top_m7d11_down <- fgsea_m7_d11_sig %>%
+  dplyr::filter(NES < 0) %>%
+  dplyr::arrange(NES) %>%
+  dplyr::select(pathway, NES, padj, size, leadingEdge) %>%
+  dplyr::slice_head(n = 10)
+
+# Top 10 positively and negatively enriched pathways M8
+top_m8d11_up <- fgsea_m8_d11_sig %>%
+  dplyr::filter(NES > 0) %>%
+  dplyr::arrange(desc(NES)) %>%
+  dplyr::select(pathway, NES, padj, size, leadingEdge) %>%
+  dplyr::slice_head(n = 10)
+
+top_m8d11_down <- fgsea_m8_d11_sig %>%
+  dplyr::filter(NES < 0) %>%
+  dplyr::arrange(NES) %>%
+  dplyr::select(pathway, NES, padj, size, leadingEdge) %>%
+  dplyr::slice_head(n = 10)
+
+
+#Output only significant
+write.csv(fgsea_m7_d11_sig[, c("pathway", "NES", "padj", "size")],
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m7_day11_sig.csv",
+          row.names = FALSE)
+
+write.csv(fgsea_m8_d11_sig[, c("pathway", "NES", "padj", "size")],
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m8_day11_sig.csv",
+          row.names = FALSE)
+
+
+write.csv(fgsea_m7_d11[, c("pathway", "NES", "padj", "size")],
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m7_day11_clean.csv",
+          row.names = FALSE)
+
+write.csv(fgsea_m8_d11[, c("pathway", "NES", "padj", "size")],
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/fgsea_m8_day11_clean.csv",
+          row.names = FALSE)
+
+
+
+```
+
+
+
+#Figures for GSEA results of M7 and M8 on Day 11
+```{r}
+#Prepare dataset
+plot_m7d11 <- bind_rows(top_m7d11_up, top_m7d11_down) %>%
+  mutate(
+    direction = ifelse(NES > 0, "Positive", "Negative"),
+    pathway = reorder(pathway, NES)
+  )
+
+plot_m8d11 <- bind_rows(top_m8d11_up, top_m8d11_down) %>%
+  mutate(
+    direction = ifelse(NES > 0, "Positive", "Negative"),
+    pathway = reorder(pathway, NES)
+  )
+
+#Barplots
+ggplot(plot_m7d11, aes(x = pathway, y = NES, fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top enriched M7 pathways at Day 11",
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+  theme_bw()
+
+
+ggplot(plot_m8d11, aes(x = pathway, y = NES, fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top enriched M8 pathways at Day 11",
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+  theme_bw()
+
+#Dotplots
+ggplot(plot_m7d11, aes(x = NES, y = pathway)) +
+  geom_point(aes(size = size, color = padj)) +
+  scale_color_gradient(low = "tomato", high = "steelblue", trans = "reverse") +
+  labs(
+    title = "Top enriched M7 pathways at Day 11",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway",
+    size = "Gene set size",
+    color = "Adjusted p-value"
+  ) +
+  theme_bw()
+
+ggplot(plot_m8d11, aes(x = NES, y = pathway)) +
+  geom_point(aes(size = size, color = padj)) +
+  scale_color_gradient(low = "tomato", high = "steelblue", trans = "reverse") +
+  labs(
+    title = "Top enriched M8 pathways at Day 11",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway",
+    size = "Gene set size",
+    color = "Adjusted p-value"
+  ) +
+  theme_bw()
+```
+
+
+#KEGG
+```{r message=FALSE, warning=FALSE}
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(KEGGREST)
+```
+
+#KEGG gene list
+```{r message=FALSE, warning=FALSE}
+# Step 1: Get direct pathway-gene links (more reliable than keggGet parsing)
+pw_gene_raw <- keggLink("mmu", "pathway")
+
+gene_pathway_df <- data.frame(
+  entrez  = sub("mmu:", "", pw_gene_raw),          # values are genes
+  pathway = sub("path:", "", names(pw_gene_raw)),   # names are pathways
+  stringsAsFactors = FALSE
+)
+
+# Step 2: Convert all Entrez IDs to symbols in one batch (faster + fewer dropped)
+all_entrez <- unique(gene_pathway_df$entrez)
+id_map <- bitr(all_entrez, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Mm.eg.db)
+
+# Step 3: Join and split by pathway
+gene_pathway_df <- merge(gene_pathway_df, id_map, by.x = "entrez", by.y = "ENTREZID")
+
+pathways_kegg_symbol <- split(gene_pathway_df$SYMBOL, gene_pathway_df$pathway)
+pathways_kegg_symbol <- lapply(pathways_kegg_symbol, unique)
+pathways_kegg_symbol <- pathways_kegg_symbol[sapply(pathways_kegg_symbol, length) > 0]
+```
+
+
+
+
+#Convert gene names
+```{r}
+# Day 4
+# Your ranked list uses gene symbols like "Actb", "Cd8a" etc.
+head(names(rank_d4))
+
+# Check KEGG pathways also have symbols (not Entrez IDs)
+head(pathways_kegg_symbol[[1]])
+
+# Check overlap — should be reasonably high (>40%)
+overlap <- sum(names(rank_d4) %in% unique(unlist(pathways_kegg_symbol)))
+cat("Overlapping genes:", overlap, "/", length(rank_d4), 
+    "(", round(overlap/length(rank_d4)*100, 1), "%)\n")
+
+#KEGG
+set.seed(42)
+fgsea_kegg_d4 <- fgsea(
+  pathways = pathways_kegg_symbol,
+  stats    = rank_d4,
+  minSize  = 10,
+  maxSize  = 500
+)
+
+fgsea_kegg_d4 <- fgsea_kegg_d4 %>% arrange(padj)
+
+# Summary
+n_sig_kegg <- sum(fgsea_kegg_d4$padj < 0.05, na.rm = TRUE)
+cat("KEGG Day 4:", n_sig_kegg, "/", nrow(fgsea_kegg_d4), "pathways significant\n")
+
+write.csv(kegg_d4_df,
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/kegg_day4_clean.csv",
+          row.names = FALSE)
+
+write.csv(top10_kegg_d4,
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/kegg_day4_top10.csv",
+          row.names = FALSE)
+
+top10_kegg_d4
+
+
+# Day 6
+gene_df_d6 <- bitr(names(rank_d6),
+                   fromType = "SYMBOL",
+                   toType = "ENTREZID",
+                   OrgDb = org.Mm.eg.db)
+
+rank_kegg_d6 <- rank_d6[gene_df_d6$SYMBOL]
+names(rank_kegg_d6) <- gene_df_d6$ENTREZID
+rank_kegg_d6 <- sort(rank_kegg_d6, decreasing = TRUE)
+
+gsea_kegg_d6 <- gseKEGG(
+  geneList = rank_kegg_d6,
+  organism = "mmu",
+  minGSSize = 10,
+  pvalueCutoff = 0.05,
+  eps = 0,
+  pAdjustMethod = "BH"
+)
+
+kegg_d6_df <- as.data.frame(gsea_kegg_d6) %>%
+  dplyr::arrange(p.adjust) %>%
+  dplyr::select(Description, NES, p.adjust, setSize)
+
+top10_kegg_d6 <- kegg_d6_df %>%
+  dplyr::slice_head(n = 10)
+
+write.csv(kegg_d6_df,
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/kegg_day6_clean.csv",
+          row.names = FALSE)
+
+write.csv(top10_kegg_d6,
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/kegg_day6_top10.csv",
+          row.names = FALSE)
+
+top10_kegg_d6
+
+
+# Day 11
+gene_df_d11 <- bitr(names(rank_d11),
+                    fromType = "SYMBOL",
+                    toType = "ENTREZID",
+                    OrgDb = org.Mm.eg.db)
+
+rank_kegg_d11 <- rank_d11[gene_df_d11$SYMBOL]
+names(rank_kegg_d11) <- gene_df_d11$ENTREZID
+rank_kegg_d11 <- sort(rank_kegg_d11, decreasing = TRUE)
+
+gsea_kegg_d11 <- gseKEGG(
+  geneList = rank_kegg_d11,
+  organism = "mmu",
+  minGSSize = 10,
+  pvalueCutoff = 0.05,
+  eps = 0,
+  pAdjustMethod = "BH"
+)
+
+
+kegg_d11_df <- as.data.frame(gsea_kegg_d11) %>%
+  dplyr::arrange(p.adjust) %>%
+  dplyr::select(Description, NES, p.adjust, setSize)
+
+top10_kegg_d11 <- kegg_d11_df %>%
+  dplyr::slice_head(n = 10)
+
+write.csv(kegg_d11_df,
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/kegg_day11_clean.csv",
+          row.names = FALSE)
+
+write.csv(top10_kegg_d11,
+          file = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/kegg_day11_top10.csv",
+          row.names = FALSE)
+
+top10_kegg_d11
+```
+
+#Top pathway tables for each day
+```{r}
+# Day 4
+top_kegg_d4_up <- kegg_d4_df %>%
+  dplyr::filter(NES > 0) %>%
+  dplyr::arrange(desc(NES)) %>%
+  dplyr::slice_head(n = 10)
+
+top_kegg_d4_down <- kegg_d4_df %>%
+  dplyr::filter(NES < 0) %>%
+  dplyr::arrange(NES) %>%
+  dplyr::slice_head(n = 10)
+
+# Day 6
+top_kegg_d6_up <- kegg_d6_df %>%
+  dplyr::filter(NES > 0) %>%
+  dplyr::arrange(desc(NES)) %>%
+  dplyr::slice_head(n = 10)
+
+top_kegg_d6_down <- kegg_d6_df %>%
+  dplyr::filter(NES < 0) %>%
+  dplyr::arrange(NES) %>%
+  dplyr::slice_head(n = 10)
+
+# Day 11
+top_kegg_d11_up <- kegg_d11_df %>%
+  dplyr::filter(NES > 0) %>%
+  dplyr::arrange(desc(NES)) %>%
+  dplyr::slice_head(n = 10)
+
+top_kegg_d11_down <- kegg_d11_df %>%
+  dplyr::filter(NES < 0) %>%
+  dplyr::arrange(NES) %>%
+  dplyr::slice_head(n = 10)
+
+
+#Prepare plotting datasets
+plot_kegg_d4 <- bind_rows(top_kegg_d4_up, top_kegg_d4_down) %>%
+  dplyr::mutate(
+    direction = ifelse(NES > 0, "Positive", "Negative"),
+    Description = reorder(Description, NES)
+  )
+
+plot_kegg_d6 <- bind_rows(top_kegg_d6_up, top_kegg_d6_down) %>%
+  dplyr::mutate(
+    direction = ifelse(NES > 0, "Positive", "Negative"),
+    Description = reorder(Description, NES)
+  )
+
+plot_kegg_d11 <- bind_rows(top_kegg_d11_up, top_kegg_d11_down) %>%
+  dplyr::mutate(
+    direction = ifelse(NES > 0, "Positive", "Negative"),
+    Description = reorder(Description, NES)
+  )
+```
+
+
+
+
+#Visualizations of KEGG Barplots
+```{r}
+# Day 4 bar plot
+ggplot(plot_kegg_d4, aes(x = Description, y = NES, fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top enriched KEGG pathways at Day 4",
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+  theme_bw()
+
+# Day 6 bar plot
+ggplot(plot_kegg_d6, aes(x = Description, y = NES, fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top enriched KEGG pathways at Day 6",
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+  theme_bw()
+
+# Day 11 bar plot
+ggplot(plot_kegg_d11, aes(x = Description, y = NES, fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top enriched KEGG pathways at Day 11",
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)"
+  ) +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "tomato")) +
+  theme_bw()
+```
+
+
+
+#Visualizations of KEGG Dotplots
+```{r}
+# Day 4 dot plot
+ggplot(plot_kegg_d4, aes(x = NES, y = Description)) +
+  geom_point(aes(size = setSize, color = p.adjust)) +
+  scale_color_gradient(low = "tomato", high = "steelblue", trans = "reverse") +
+  labs(
+    title = "Top enriched KEGG pathways at Day 4",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway",
+    size = "Gene set size",
+    color = "Adjusted p-value"
+  ) +
+  theme_bw()
+
+# Day 6 dot plot
+ggplot(plot_kegg_d6, aes(x = NES, y = Description)) +
+  geom_point(aes(size = setSize, color = p.adjust)) +
+  scale_color_gradient(low = "tomato", high = "steelblue", trans = "reverse") +
+  labs(
+    title = "Top enriched KEGG pathways at Day 6",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway",
+    size = "Gene set size",
+    color = "Adjusted p-value"
+  ) +
+  theme_bw()
+
+# Day 11 dot plot
+ggplot(plot_kegg_d11, aes(x = NES, y = Description)) +
+  geom_point(aes(size = setSize, color = p.adjust)) +
+  scale_color_gradient(low = "tomato", high = "steelblue", trans = "reverse") +
+  labs(
+    title = "Top enriched KEGG pathways at Day 11",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway",
+    size = "Gene set size",
+    color = "Adjusted p-value"
+  ) +
+  theme_bw()
+```
+
+
+
+#Reactome day 4
+```{r}
+fgsea_reactome_d4 <- fgsea(
+  pathways = pathways_reactome,
+  stats = rank_d4,
+  minSize = 10,
+  maxSize = 500
+)
+
+fgsea_reactome_d4 <- fgsea_reactome_d4 %>%
+  arrange(padj)
+
+
+#Prepare Reactome results for plotting
+#Removes "REACTOME_" from the beginning
+#Replaces underscores with space
+reactome_d4_df <- fgsea_reactome_d4 %>%
+  as.data.frame() %>%
+  filter(!is.na(padj)) %>%
+  mutate(
+    Description = str_replace_all(pathway, "^REACTOME_", ""),
+    Description = str_replace_all(Description, "_", " ")
+  )
+
+#Significant Pathways only
+reactome_d4_sig <- reactome_d4_df %>%
+  filter(padj < 0.05) %>%
+  arrange(desc(NES))
+
+get_top10 <- function(df, direction) {
+  if (direction == "up") {
+    df %>%
+      filter(NES > 0) %>%
+      arrange(desc(NES)) %>%
+      slice_head(n = 10)
+  } else {
+    df %>%
+      filter(NES < 0) %>%
+      arrange(NES) %>%
+      slice_head(n = 10)
+  }
+}
+
+reactome_d4_top <- bind_rows(
+  get_top10(reactome_d4_sig, "up"),
+  get_top10(reactome_d4_sig, "down")
+) %>%
+  arrange(NES)
+
+#Bar plot
+ggplot(reactome_d4_top,
+       aes(x = reorder(Description, NES), y = NES)) +
+  geom_col(aes(fill = NES > 0)) +
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "tomato")) +
+  coord_flip() +
+  labs(x = "Reactome pathway",
+       y = "Normalized Enrichment Score (NES)",
+       title = "Significant Reactome pathways at Day 4") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+#Dotplot
+ggplot(reactome_d4_top,
+       aes(x = NES,
+           y = reorder(Description, NES),
+           size = -log10(padj),
+           color = NES)) +
+  geom_point() +
+  labs(x = "Normalized Enrichment Score (NES)",
+       y = "Reactome pathway",
+       title = "Significant Reactome pathways at Day 4",
+       size = "-log10 adjusted p-value") +
+  theme_bw()
+
+
+
+```
+
+#Reactome day6
+```{r}
+fgsea_reactome_d6 <- fgsea(
+  pathways = pathways_reactome,
+  stats = rank_d6,
+  minSize = 10,
+  maxSize = 500
+)
+
+fgsea_reactome_d6 <- fgsea_reactome_d6 %>%
+  arrange(padj)
+
+# Prepare Reactome results for plotting
+reactome_d6_df <- fgsea_reactome_d6 %>%
+  as.data.frame() %>%
+  filter(!is.na(padj)) %>%
+  mutate(
+    Description = str_replace_all(pathway, "^REACTOME_", ""),
+    Description = str_replace_all(Description, "_", " ")
+  )
+
+# Significant pathways only
+reactome_d6_sig <- reactome_d6_df %>%
+  filter(padj < 0.05) %>%
+  arrange(desc(NES))
+
+reactome_d6_top <- bind_rows(
+  get_top10(reactome_d6_sig, "up"),
+  get_top10(reactome_d6_sig, "down")
+) %>%
+  arrange(NES)
+
+# Bar plot
+ggplot(reactome_d6_top,
+       aes(x = reorder(Description, NES), y = NES)) +
+  geom_col(aes(fill = NES > 0)) +
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "tomato")) +
+  coord_flip() +
+  labs(x = "Reactome pathway",
+       y = "Normalized Enrichment Score (NES)",
+       title = "Significant Reactome pathways at Day 6") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# Dot plot
+ggplot(reactome_d6_top,
+       aes(x = NES,
+           y = reorder(Description, NES),
+           size = -log10(padj),
+           color = NES)) +
+  geom_point() +
+  labs(x = "Normalized Enrichment Score (NES)",
+       y = "Reactome pathway",
+       title = "Significant Reactome pathways at Day 6",
+       size = "-log10 adjusted p-value") +
+  theme_bw()
+```
+
+
+#Reactome day 11
+```{r}
+# Reactome day 11
+
+fgsea_reactome_d11 <- fgsea(
+  pathways = pathways_reactome,
+  stats = rank_d11,
+  minSize = 10,
+  maxSize = 500
+)
+
+fgsea_reactome_d11 <- fgsea_reactome_d11 %>%
+  arrange(padj)
+
+# Prepare Reactome results for plotting
+reactome_d11_df <- fgsea_reactome_d11 %>%
+  as.data.frame() %>%
+  filter(!is.na(padj)) %>%
+  mutate(
+    Description = str_replace_all(pathway, "^REACTOME_", ""),
+    Description = str_replace_all(Description, "_", " ")
+  )
+
+# Significant pathways only
+reactome_d11_sig <- reactome_d11_df %>%
+  filter(padj < 0.05) %>%
+  arrange(desc(NES))
+
+reactome_d11_top <- bind_rows(
+  get_top10(reactome_d11_sig, "up"),
+  get_top10(reactome_d11_sig, "down")
+) %>%
+  arrange(NES)
+
+
+# Bar plot
+ggplot(reactome_d11_top,
+       aes(x = reorder(Description, NES), y = NES)) +
+  geom_col(aes(fill = NES > 0)) +
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "tomato")) +
+  coord_flip() +
+  labs(x = "Reactome pathway",
+       y = "Normalized Enrichment Score (NES)",
+       title = "Significant Reactome pathways at Day 11") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# Dot plot
+ggplot(reactome_d11_top,
+       aes(x = NES,
+           y = reorder(Description, NES),
+           size = -log10(padj),
+           color = NES)) +
+  geom_point() +
+  labs(x = "Normalized Enrichment Score (NES)",
+       y = "Reactome pathway",
+       title = "Significant Reactome pathways at Day 11",
+       size = "-log10 adjusted p-value") +
+  theme_bw()
+```
+
+
+#Overlapping genes
+```{r}
+# Get all unique genes in each collection
+m7_genes <- unique(unlist(pathways_m7))
+m8_genes <- unique(unlist(pathways_m8))
+reactome_genes <- unique(unlist(pathways_reactome))
+kegg_genes <- unique(unlist(pathways_kegg_symbol))
+
+# Pairwise overlaps
+overlap_summary <- rbind(
+  calc_overlap(m7_genes, m8_genes,       "M7",      "M8"),
+  calc_overlap(m7_genes, reactome_genes, "M7",      "Reactome"),
+  calc_overlap(m7_genes, kegg_genes,     "M7",      "KEGG"),
+  calc_overlap(m8_genes, reactome_genes, "M8",      "Reactome"),
+  calc_overlap(m8_genes, kegg_genes,     "M8",      "KEGG"),
+  calc_overlap(reactome_genes, kegg_genes, "Reactome", "KEGG")
+)
+overlap_summary
+
+# All 4-way overlap
+overlap_all4 <- Reduce(intersect, list(m7_genes, m8_genes, reactome_genes, kegg_genes))
+
+all4_summary <- data.frame(
+  comparison      = "M7 vs M8 vs Reactome vs KEGG",
+  n_overlap       = length(overlap_all4),
+  out_of_M7       = length(m7_genes),
+  pct_M7          = round(length(overlap_all4) / length(m7_genes) * 100, 2),
+  out_of_M8       = length(m8_genes),
+  pct_M8          = round(length(overlap_all4) / length(m8_genes) * 100, 2),
+  out_of_Reactome = length(reactome_genes),
+  pct_Reactome    = round(length(overlap_all4) / length(reactome_genes) * 100, 2),
+  out_of_KEGG     = length(kegg_genes),
+  pct_KEGG        = round(length(overlap_all4) / length(kegg_genes) * 100, 2)
+)
+all4_summary
+
+overlap_all4 <- Reduce(
+  intersect,
+  list(m7_genes, m8_genes, reactome_genes, kegg_genes)
+)
+
+all4_summary <- data.frame(
+  comparison = "M7 vs M8 vs Reactome vs KEGG",
+  n_overlap = length(overlap_all4),
+  out_of_M7 = length(m7_genes),
+  pct_M7 = round(length(overlap_all4) / length(m7_genes) * 100, 2),
+  out_of_M8 = length(m8_genes),
+  pct_M8 = round(length(overlap_all4) / length(m8_genes) * 100, 2),
+  out_of_Reactome = length(reactome_genes),
+  pct_Reactome = round(length(overlap_all4) / length(reactome_genes) * 100, 2),
+  out_of_KEGG = length(kegg_genes),
+  pct_KEGG = round(length(overlap_all4) / length(kegg_genes) * 100, 2)
+)
+
+all4_summary
+
+#Visualization
+library(ggVennDiagram)
+
+gene_sets <- list(
+  M7       = m7_genes,
+  M8       = m8_genes,
+  Reactome = reactome_genes,
+  KEGG     = kegg_genes
+)
+
+ggVennDiagram(gene_sets) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Gene overlap across pathway collections")
+```
+

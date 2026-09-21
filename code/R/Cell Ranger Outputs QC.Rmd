@@ -1,0 +1,710 @@
+---
+title: "Cell Ranger Output QC"
+author: "Esther Zhou"
+date: "2026-04-01"
+output: html_document
+---
+
+
+```{r message=FALSE, warning=FALSE}
+library(Seurat)
+library(Matrix)
+library(pheatmap)
+library(hdf5r)
+library(dplyr)
+library(tidyr)
+library(openxlsx)
+library(ggplot2)
+library(ggrepel)
+library(writexl)
+library(edgeR)
+library(readxl)
+```
+
+#Load the datasets
+```{r}
+data.seurat <- readRDS("/work/users/x/c/xczhou/Chlamydia/processed/data_seurat.rds")
+mouse_data <- readRDS("/work/users/x/c/xczhou/Chlamydia/processed/mouse_data.rds")
+sample_info <- readRDS("/work/users/x/c/xczhou/Chlamydia/processed/sample_info.rds")
+```
+
+#QC heatmap
+sample vs sample correlation
+```{r}
+# Filter genes
+keep <- rowSums(mouse_data) > 0
+mouse_data <- mouse_data[keep, ]
+
+#Library size normalization and Log2 transformation 
+log_cpm <- cpm(mouse_data, log = TRUE, prior.count = 1)
+
+# Correlation matrices
+cor_matp <- cor(log_cpm, method = "pearson")
+cor_matsp <- cor(log_cpm, method = "spearman")
+
+rownames(sample_info) <- sample_info$sample
+# Annotation
+annotation_col <- sample_info[colnames(mouse_data), c("group", "day"), drop = FALSE]
+annotation_row <- annotation_col
+
+# Make day a factor in the order i want
+annotation_col$day <- factor(annotation_col$day, levels = c(-2, 4, 6, 11))
+annotation_row$day <- factor(annotation_row$day, levels = c(-2, 4, 6, 11))
+
+# Manual annotation colors
+ann_colors <- list(
+  group = c(
+    Naive = "#0072B2",
+    Vaccinated = "#D55E00"
+  ),
+  day = c(
+    "-2" = "#f2f0f7",
+    "4"  = "#6a51a3",
+    "6"  = "#9e9ac8",
+    "11" = "#cbc9e2"
+  )
+)
+
+#Plot Heatmaps
+png("/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/pearson_heatmap.png",
+    width = 3600, height = 3200, res = 400)
+pheatmap(
+  cor_matp,
+  annotation_col = annotation_col,
+  annotation_row = annotation_row,
+  annotation_colors = ann_colors,
+  border_color = NA,
+  main = "Pearson Correlation of Mouse Gene Expression",
+  fontsize = 10,
+  fontsize_row = 6,
+  fontsize_col = 6
+)
+dev.off()
+
+png("/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/spearman_heatmap.png",
+    width = 3600, height = 3200, res = 400)
+pheatmap(cor_matsp,
+         annotation_col = annotation_col,
+         annotation_row = annotation_row,
+         annotation_colors = ann_colors,
+         border_color = NA,
+         main = "Spearman Correlation of Mouse Gene Expression",
+         fontsize = 10,
+         fontsize_row = 6,
+         fontsize_col = 6)
+dev.off()
+
+#Investigate low correlation samples
+colSums(mouse_data)
+sort(colSums(mouse_data))
+
+```
+
+#Excluding M52_D4
+```{r}
+#Excluding M52_D4
+mouse_data_no_M52D4 <- mouse_data[, colnames(mouse_data) != "M52_D4"]
+sample_info_no_M52D4 <- sample_info[colnames(mouse_data_no_M52D4), ]
+
+log_cpm_no <- cpm(mouse_data_no_M52D4, log = TRUE, prior.count = 1)
+
+# Correlation matrices
+cor_matp_no  <- cor(log_cpm_no, method = "pearson")
+cor_matsp_no <- cor(log_cpm_no, method = "spearman")
+
+# Annotation data
+annotation_col_no <- sample_info_no_M52D4[, c("group", "day"), drop = FALSE]
+annotation_row_no <- annotation_col_no
+
+# Make day a factor in the order you want
+annotation_col_no$day <- factor(annotation_col_no$day, levels = c(-2, 4, 6, 11))
+annotation_row_no$day <- factor(annotation_row_no$day, levels = c(-2, 4, 6, 11))
+
+# Annotation colors
+ann_colors <- list(
+  group = c(
+    Naive = "#0072B2",
+    Vaccinated = "#D55E00"
+  ),
+  day = c(
+    "-2" = "#f2f0f7",
+    "4"  = "#6a51a3",
+    "6"  = "#9e9ac8",
+    "11" = "#cbc9e2"
+  )
+)
+
+# Pearson heatmap
+pheatmap(
+  cor_matp_no,
+  annotation_col = annotation_col_no,
+  annotation_row = annotation_row_no,
+  annotation_colors = ann_colors,
+  border_color = NA,
+  main = "Pearson Correlation (M52_D4 removed)",
+  show_rownames = TRUE,
+  show_colnames = FALSE
+)
+```
+
+
+#Excluding M52_D4 and M52_D6
+
+```{r}
+
+#Excluding M52_D4 and M52_D6
+mouse_data_no_M52D4D6 <- mouse_data[, !(colnames(mouse_data) %in% c("M52_D4", "M52_D6"))]
+sample_info_no_M52D4D6 <- sample_info[colnames(mouse_data_no_M52D4D6), ]
+
+log_cpm_filtered <- cpm(mouse_data_no_M52D4D6, log = TRUE, prior.count = 1)
+
+cor_matp_filtered <- cor(log_cpm_filtered, method = "pearson")
+cor_matsp_filtered <- cor(log_cpm_filtered, method = "spearman")
+
+annotation_col_filtered <- sample_info_no_M52D4D6[, c("group", "day"), drop = FALSE]
+annotation_row_filtered <- annotation_col_filtered
+
+# Make day a factor in the order you want
+annotation_col_filtered$day <- factor(annotation_col_filtered$day, levels = c(-2, 4, 6, 11))
+annotation_row_filtered$day <- factor(annotation_row_filtered$day, levels = c(-2, 4, 6, 11))
+
+
+png("/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/pearson_heatmap_d4d6removed.png",
+    width = 4800, height = 4200, res = 400)
+pheatmap(
+  cor_matp_filtered,
+  annotation_col = annotation_col_filtered,
+  annotation_row = annotation_row_filtered,
+  annotation_colors = ann_colors,
+  border_color = NA,
+  main = "Pearson Correlation (M52_D4 D6 removed)",
+  show_rownames = TRUE,
+  show_colnames = TRUE
+)
+
+dev.off()
+```
+
+
+#Import from Deseq2 filtered.rmd first
+#DESeq2 sample sample correlation
+```{r}
+rld <- rlog(dds_mouse, blind = TRUE)
+rld_mat <- assay(rld)
+
+# Sample-sample correlations
+rld_corp <- cor(rld_mat, method = "pearson")
+rld_cors <- cor(rld_mat, method = "spearman")
+
+# Make sure sample_info rownames match rld_mat columns
+rownames(sample_info) <- sample_info$sample
+
+# Annotation data
+annotation_col <- sample_info[colnames(rld), c("group", "day"), drop = FALSE]
+
+# Clearer annotation colors
+ann_colors <- list(
+  group = c(
+    Naive = "#0072B2",
+    Vaccinated = "orange"
+  ),
+  day = c(
+    "-2" = "#f2f0f7",
+    "4"  = "#6a51a3",
+    "6"  = "#9e9ac8",
+    "11" = "#cbc9e2"
+  )
+)
+
+# Plot heatmap
+heat1_annotation <- pheatmap(
+  rld_corp,
+  annotation_col = annotation_col,
+  annotation_row = annotation_col,   # add this for consistency
+  annotation_colors = ann_colors,
+  main = "Sample Correlation (rlog-transformed counts) - Pearson",
+  show_rownames = FALSE,
+  show_colnames = TRUE,
+  fontsize = 12
+)
+
+heat1_annotation <- pheatmap(
+  rld_cors,
+  annotation_col = annotation_col,
+  annotation_row = annotation_col,   # add this for consistency
+  annotation_colors = ann_colors,
+  main = "Sample Correlation (rlog-transformed counts) - Spearman",
+  show_rownames = FALSE,
+  show_colnames = TRUE,
+  fontsize = 12
+)
+
+ggsave(paste0("/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/heatmap_rlog_filtered.tiff"),
+       heat1_annotation,
+       device = "tiff",
+       width =12,
+       dpi = 300)
+
+
+pheatmap(rld_cor, cluster_rows=FALSE, cluster_cols=FALSE,
+         main="rlog correlation (no clustering)")
+```
+
+
+
+
+#Filter out M52_D4
+```{r}
+mouse_data <- mouse_data[, colnames(mouse_data) != "M52_D4"]
+sample_info <- sample_info[rownames(sample_info) != "M52_D4", ]
+data.seurat <- subset(
+  data.seurat,
+  cells = setdiff(colnames(data.seurat), "M52_D4")
+)
+```
+
+# Highly expressed Mouse RNA
+I computed the mean raw expression for each gene across samples within each day.
+```{r}
+mouse.exprs <- t(mouse_data) %>% as.data.frame()
+mouse.exprs.log2 <- log2(mouse.exprs + 1)
+
+mouse.exprs$day <- sample_info$day
+mouse.exprs$group <- sample_info$group
+
+mouse.exprs.log2$day <- sample_info$day
+mouse.exprs.log2$group <- sample_info$group
+
+#Top genes
+#take all samples in that day, compute mean expression for each gene
+#raw
+top_genes <- mouse.exprs %>%
+  group_by(day) %>%
+  summarise(across(-group, \(x) mean(x, na.rm = TRUE))) %>% 
+  pivot_longer(-day, names_to = "gene", values_to = "avg_expression") %>%  
+  group_by(day) %>%
+  arrange(desc(avg_expression)) %>%  
+  mutate(label_high = ifelse(avg_expression > 15000, toupper(gene), ""))
+
+top20_genes <- top_genes %>%
+  group_by(day) %>%
+  slice_head(n = 20)
+openxlsx::write.xlsx(top20_genes, "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/top20_genes.xlsx")
+
+#log2
+top_genes_log2 <- mouse.exprs.log2 %>%
+  group_by(day) %>%
+  summarise(across(-group, \(x) mean(x, na.rm = TRUE))) %>% 
+  pivot_longer(-day, names_to = "gene", values_to = "avg_expression") %>%  
+  group_by(day) %>%
+  arrange(desc(avg_expression)) %>%  
+  mutate(label_high = ifelse(avg_expression > log2(15000 + 1), toupper(gene), ""))
+
+top20_genes_log2 <- top_genes_log2 %>%
+  group_by(day) %>%
+  slice_head(n = 20)
+openxlsx::write.xlsx(top20_genes_log2,  "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/top20_genes_log2.xlsx")
+
+
+#Average log2 transformed expression of mouse RNA across all samples measured at 4 timepoints. Selected highly expressed genes are labeled.
+#raw
+p1 <- ggplot(top_genes, 
+             aes(x = factor(day, levels = c(-2, 4, 6, 11)), y = avg_expression)) +
+  geom_jitter(width = 0.25, size = 3, alpha = 0.3, color = "grey50") +
+  geom_text_repel(aes(label = label_high),
+            size = 5,
+    box.padding = unit(0.2, "lines"), 
+    point.padding = unit(0.2, "lines"),
+    fontface = "italic",
+    color = "black",
+    max.overlaps = Inf,
+    force = 4, 
+    direction = "both") +
+  labs(y = "Average Expression",
+       x = "Days post-inoculation (dpi)") +
+  theme(axis.text.x = element_text(hjust = 1,size=14, color="black"), 
+        axis.text.y = element_text(size = 14, color = "black"),
+        axis.title = element_text(size = 16), 
+        legend.position = "none",
+         panel.background = element_rect(fill = "white"),
+          plot.background = element_rect(fill = "white"),
+        axis.line.x = element_line(color = "black"),
+          axis.line.y = element_line(color = "black"))
+
+
+ggsave(paste0("/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/gene_exprs.tiff"),
+       p1,
+       device = "tiff",     # Specify the file type
+       width = 10,           # Width of the plot (in inches)
+       height = 7,          # Height of the plot (in inches)
+       dpi = 300)
+
+#log2
+p2 <- ggplot(top_genes_log2, 
+             aes(x = factor(day, levels = c(-2, 4, 6, 11)), y = avg_expression)) +
+  geom_jitter(width = 0.25, size = 1.5, alpha = 0.3, color = "grey50") +
+  geom_text_repel(aes(label = label_high),
+            size = 5,
+    box.padding = unit(0.2, "lines"), 
+    point.padding = unit(0.2, "lines"),
+    fontface = "italic",
+    color = "black",
+    max.overlaps = Inf,
+    force = 4, 
+    direction = "both") +
+  labs(y = "Average Log2 Expression",
+       x = "Days post-inoculation (dpi)") +
+  theme(axis.text.x = element_text(hjust = 1,size=14, color="black"), 
+        axis.text.y = element_text(size = 14, color = "black"),
+        axis.title = element_text(size = 16), 
+        legend.position = "none",
+         panel.background = element_rect(fill = "white"),
+          plot.background = element_rect(fill = "white"),
+        axis.line.x = element_line(color = "black"),
+          axis.line.y = element_line(color = "black"))
+
+
+ggsave(paste0("/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/gene_exprs_log(2+1).tiff"),
+       p2,
+       device = "tiff",     # Specify the file type
+       width = 10,           # Width of the plot (in inches)
+       height = 7,          # Height of the plot (in inches)
+       dpi = 300)
+ 
+```
+
+
+#Total Chlamydia Reads Detected
+```{r}
+#Chlamydia-specific probes detected in RNA-seq libraries
+chlam_data <- as.matrix(data.seurat[["ChlamydiaRNA"]]$counts)
+colSums(chlam_data)
+
+#total reads per gene
+gene_total <- rowSums(chlam_data)
+gene_total
+
+#number of mice with detection
+mice_detected <- rowSums(chlam_data > 0)
+mice_detected
+
+#Table 1
+result_table <- data.frame(
+  Gene = rownames(chlam_data),
+  Total_Reads = rowSums(chlam_data),
+  Mice_Detected = rowSums(chlam_data > 0)
+)
+
+result_table
+
+#Two summaries within each group
+chlam_naive <- chlam_data[, sample_info$group == "Naive", drop = FALSE]
+chlam_vacc <- chlam_data[, sample_info$group == "Vaccinated", drop = FALSE]
+
+chlam_table <- data.frame(
+  Gene = rownames(chlam_data),
+  
+  Total_Read_Count = rowSums(chlam_data),
+  Total_Mice_Detected = paste0(rowSums(chlam_data > 0), "/", ncol(chlam_data)),
+  
+  Naive_Read_Count = rowSums(chlam_naive),
+  Naive_Mice_Detected = paste0(rowSums(chlam_naive > 0), "/", ncol(chlam_naive)),
+  
+  Vaccinated_Read_Count = rowSums(chlam_vacc),
+  Vaccinated_Mice_Detected = paste0(rowSums(chlam_vacc > 0), "/", ncol(chlam_vacc)),
+  
+  stringsAsFactors = FALSE
+)
+
+chlam_table <- chlam_table[order(-chlam_table$Total_Read_Count), ]
+chlam_table
+
+
+#Separated by days
+sample_info$subgroup <- paste(sample_info$group, sample_info$day_label)
+
+sample_info$subgroup <- factor(sample_info$subgroup)
+sample_info$subgroup <- factor(
+  sample_info$subgroup,
+  levels = c(
+    "Naive D-2",
+    "Naive D4",
+    "Naive D6",
+    "Naive D11",
+    "Vaccinated D-2",
+    "Vaccinated D4",
+    "Vaccinated D6",
+    "Vaccinated D11"
+  )
+)
+
+#extracts the ordered levels of the factor
+subgroups <- levels(sample_info$subgroup)
+
+chlam_day_table <- data.frame(Gene = rownames(chlam_data), stringsAsFactors = FALSE)
+
+for (sg in subgroups) {
+  idx <- sample_info$subgroup == sg
+  
+  sub_mat <- chlam_data[, idx, drop = FALSE]
+  
+  chlam_day_table[[paste0(sg, " Read Count")]] <- rowSums(sub_mat)
+  chlam_day_table[[paste0(sg, " # Mice")]] <- paste0(rowSums(sub_mat > 0), "/", ncol(sub_mat))
+}
+
+chlam_day_table$Gene <- sub("^Chlamydia_", "", chlam_day_table$Gene)
+chlam_day_table <- chlam_day_table[order(-rowSums(chlam_data)), ]
+
+print(chlam_day_table, row.names = FALSE)
+
+
+#Long Table
+subgroups <- expand.grid(
+  Group = c("Naive", "Vaccinated"),
+  Day = c("-2", "4", "6", "11"),
+  stringsAsFactors = FALSE
+)
+
+chlam_day_long <- data.frame()
+
+for (i in seq_len(nrow(subgroups))) {
+  g <- subgroups$Group[i]
+  d <- subgroups$Day[i]
+  
+  idx <- sample_info$group == g & sample_info$day == d
+  sub_mat <- chlam_data[, idx, drop = FALSE]
+  
+  tmp <- data.frame(
+    Gene = rownames(chlam_data),
+    Group = g,
+    Day = d,
+    Read_Count = rowSums(sub_mat),
+    Mice_Detected = paste0(rowSums(sub_mat > 0), "/", ncol(sub_mat)),
+    stringsAsFactors = FALSE
+  )
+  
+  chlam_day_long <- rbind(chlam_day_long, tmp)
+}
+
+chlam_day_long$Gene <- sub("^Chlamydia_", "", chlam_day_long$Gene)
+chlam_day_long$Day_Label <- paste0(chlam_day_long$Day, " dpi")
+chlam_day_long$Day_Label[chlam_day_long$Day == "-2"] <- "-2 dpi"
+
+chlam_day_long <- chlam_day_long[order(chlam_day_long$Gene,
+                                       chlam_day_long$Group,
+                                       as.numeric(chlam_day_long$Day)), ]
+
+print(chlam_day_long, row.names = FALSE)
+
+write_xlsx(
+  list(
+    "Overall_Summary" = chlam_table,
+    "By_Group_Day_Wide" = chlam_day_table,
+    "By_Group_Day_Long" = chlam_day_long
+  ),
+  "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/Tables/chlamydia_summary_tables.xlsx"
+)
+```
+
+
+#Chlamydia Gene Count Figure
+```{r}
+
+#Plotting table
+chlam_plot_data <- as.data.frame(chlam_data) %>%
+  tibble::rownames_to_column("Gene") %>%
+  pivot_longer(
+    cols = -Gene,
+    names_to = "sample",
+    values_to = "count"
+  ) %>%
+  left_join(sample_info, by = "sample") %>%
+  mutate(
+    Gene = sub("^Chlamydia_", "", Gene),
+    day_num = as.numeric(as.character(day))
+  )
+
+#create the plotting data
+plot_chlam <- chlam_plot_data %>%
+  filter(Gene %in% c("16SrRNA", "23SrRNA", "omcB")) %>%
+  mutate(
+    Gene_group = case_when(
+      Gene %in% c("16SrRNA", "23SrRNA") ~ "16SrRNA + 23SrRNA",
+      Gene == "omcB" ~ "omcB"
+    )
+  ) %>%
+  group_by(sample, mouse, group, day, day_label, day_num, Gene_group) %>%
+  summarise(count = sum(count), .groups = "drop") %>%
+  mutate(log10_count = log10(count + 1))
+
+#Figure
+ggplot(
+  plot_chlam,
+  aes(x = day_num, y = log10_count, group = mouse, color = group)
+) +
+  geom_line(alpha = 0.7, linewidth = 0.7) +
+  geom_point(size = 2) +
+  facet_wrap(~ Gene_group, scales = "free_y") +
+  scale_x_continuous(breaks = c(-2, 4, 6, 11)) +
+  labs(
+    x = "Days post infection",
+    y = expression(log[10]~"(read count + 1)"),
+    color = "Group",
+    title = "Chlamydia Gene Counts per Mouse Over Time"
+  ) +
+  theme_bw()
+
+ggsave(
+  filename = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/chlamydia_gene_trajectories.png",
+  width = 8,
+  height = 5,
+  dpi = 300
+)
+
+```
+
+
+
+#Genome equivalents vs rRNA counts
+```{r}
+# Import genome equivalents
+ge_raw <- read_excel(
+  "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/Genome_Equivalents.xlsx"
+)
+
+head(ge_raw)
+
+#Reshape the table
+ge_long <- ge_raw %>%
+  pivot_longer(
+    cols = -Mouse,
+    names_to = "day",
+    values_to = "genome_equivalent"
+  ) %>%
+  mutate(
+    mouse = as.numeric(Mouse),
+    day = as.numeric(day),
+    ge_log10 = log10(genome_equivalent + 1)
+  ) %>%
+  select(mouse, day, genome_equivalent, ge_log10)
+
+#Create total 16S + 23S counts
+chlam_long <- as.data.frame(chlam_data) %>%
+  tibble::rownames_to_column("Gene") %>%
+  pivot_longer(
+    cols = -Gene,
+    names_to = "sample",
+    values_to = "count"
+  ) %>%
+  left_join(sample_info, by = "sample") %>%
+  mutate(
+    Gene = sub("^Chlamydia_", "", Gene),
+    day = as.numeric(as.character(day))
+  )
+
+#Sum 16S + 23S per mouse/day
+rna_16s_23s <- chlam_long %>%
+  filter(Gene %in% c("16SrRNA", "23SrRNA")) %>%
+  group_by(sample, mouse, group, day) %>%
+  summarise(
+    total_rRNA_count = sum(count),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rna_log10 = log10(total_rRNA_count + 1)
+  )
+
+#Merge RNA-seq with genome equivalents
+plot_data <- rna_16s_23s %>%
+  left_join(ge_long, by = c("mouse", "day"))
+
+plot_data <- plot_data %>%
+  filter(!is.na(genome_equivalent))
+
+
+#Calculate Spearman Overall correlation
+#Across all samples, is there an association?
+cor_all <- cor.test(
+  plot_data$rna_log10,
+  plot_data$ge_log10,
+  method = "spearman"
+)
+
+r_all <- unname(cor_all$estimate)
+p_all <- cor_all$p.value
+
+#Group-specific correlations
+#Does the relationship differ between Vaccinated vs Naive?
+r_group <- plot_data %>%
+  group_by(group) %>%
+  summarise(
+    r = cor(rna_log10, ge_log10, method = "spearman"),
+    n = n(),
+    .groups = "drop"
+  )
+
+r_group
+
+#Label
+r_vacc <- r_group$r[r_group$group == "Vaccinated"]
+r_naive <- r_group$r[r_group$group == "Naive"]
+
+r_label <- paste0(
+  "R = ", round(r_all, 2), "\n",
+  "Vaccinated R = ", round(r_vacc, 2), "\n",
+  "Naive R = ", round(r_naive, 2)
+)
+
+#Plot
+p <- ggplot(
+  plot_data,
+  aes(x = ge_log10, y = rna_log10, color = group, shape = factor(day))
+) +
+  geom_point(size = 3) +
+geom_smooth(
+  data = plot_data,
+  aes(x = ge_log10, y = rna_log10),
+  method = "lm",
+  se = FALSE,
+  color = "black",
+  linetype = "dashed",
+  inherit.aes = FALSE
+) +
+  annotate(
+    "text",
+    x = min(plot_data$ge_log10, na.rm = TRUE) + 0.2,
+    y = max(plot_data$rna_log10, na.rm = TRUE) - 0.2,
+    label = r_label,
+    hjust = 0,
+    vjust = 1,
+    size = 4.5
+  ) +
+  labs(
+    x = expression(Log[10]~"Genome Equivalents"),
+    y = expression(Log[10]~"rRNA-seq Counts"),
+    color = "Group",
+    shape = "dpi",
+    title = "Chlamydial rRNA Counts vs Genome Equivalents"
+  ) +
+  scale_color_manual(
+    values = c(
+      "Naive" = "purple",
+      "Vaccinated" = "orange"
+    )
+) +
+  theme_bw()
+
+p
+
+ggsave(
+  filename = "/work/users/x/c/xczhou/Chlamydia/Analysis Outputs/chlamydia_gene_GE.png",
+  plot = p,
+  width = 8,
+  height = 5,
+  dpi = 300
+)
+
+```
+
+
+
